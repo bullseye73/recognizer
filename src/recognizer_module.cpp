@@ -94,7 +94,8 @@ main()
 		{ categories[0],{ L"PORT OF LOADING", L"PORT OF DISCHARGE", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"AGENT" } },
 		{ categories[1],{ L"NEGOTIATION BANK" } },
 		{ categories[2],{ L"" } },
-		{ categories[3],{ L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"CARRIER", L"PLACE OF ISSUE", L"ORIGIN", L"SHIPPING LINE" } },
+		{ categories[3],{ L"CONSIGNEE", L"CARRIER", L"NOTIFY", L"PORT OF DISCHARGE", L"PORT OF LOADING", L"SHIPMENT DATE", L"VESSEL NAME" } },
+		//{ categories[3],{ L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"CARRIER", L"PLACE OF ISSUE", L"ORIGIN", L"SHIPPING LINE" } },
 		{ categories[4],{ L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"PLACE OF ISSUE" } },
 		{ categories[5],{ L"ORIGIN", L"GOODS DESCRIPTION", L"PORT OF LOADING", L"PLACE OF DELIVERY", L"PORT OF DISCHARGE", L"VESSEL NAME", } },
 		{ categories[6],{ L"ORIGIN", L"IMPORTER" } },
@@ -107,7 +108,7 @@ main()
 		{ categories[12],{ L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"SHIPPING LINE", L"INSURANCE COMPANY" } },
 		{ categories[13],{ L"", } },
 		//{ categories[14],{ L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"VESSEL NAME" } },
-		{ categories[14],{ L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"VESSEL NAME", L"L/C" } },
+		{ categories[14],{ L"SELLER", L"AMOUNT", L"L/C" } },
 		{ categories[15],{ L"CARRIER", L"SHOPPER", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"CONSIGNEE", L"GOODS DESCRIPTION", L"NOTIFY" } },
 		{ categories[16],{ L"SELLER", L"BUYER", L"ORIGIN", L"APPLICANT", L"COLLECTING BANK" } },
 	};
@@ -128,9 +129,9 @@ main()
 	std::sort(std::begin(files), std::end(files), compareNat);
 
 	for (const auto& file : files) {
-		auto category = L"BILL OF LADING";// categories[14];
+		//auto category = L"BILL OF LADING";// categories[14];
 		//auto category = L"LETTER OF CREDIT"; //
-		//auto category = L"COMMERCIAL INVOICE";
+		auto category = L"COMMERCIAL INVOICE";
 		const auto fields = recognizer->recognize(file, category);
 
 		auto output_path = fmt::format(L"{}_result.txt", boost::filesystem::path(file).native());

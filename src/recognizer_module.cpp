@@ -102,7 +102,7 @@ main()
 		{ categories[7],{ L"GOODS DESCRIPTION" } },
 		{ categories[8],{ L"INSURANCE COMPANY", L"INSURANCE SETTLING AGENT", L"INSURANCE SURVEY AGENT", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"ORIGIN", L"GOODS DESCRIPTION" } },
 		//{ categories[9],{ L"ISSUING BANK", L"COLLECTING BANK", L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE" } },
-		{ categories[9],{ L"ISSUING BANK", L"AMOUNT", L"CREDIT NO" } },
+		{ categories[9],{ L"SWIFT MT SENDER", L"AMOUNT", L"CREDIT NUMBER" } },
 		{ categories[10],{ L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERTY", L"VESSEL NAME" } },
 		{ categories[11],{ L"ISSUING BANK", L"DRAWER" } },
 		{ categories[12],{ L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"SHIPPING LINE", L"INSURANCE COMPANY" } },
@@ -130,8 +130,8 @@ main()
 
 	for (const auto& file : files) {
 		//auto category = L"BILL OF LADING";// categories[14];
-		//auto category = L"LETTER OF CREDIT"; //
-		auto category = L"COMMERCIAL INVOICE";
+		auto category = L"LETTER OF CREDIT"; //
+		//auto category = L"COMMERCIAL INVOICE";
 		const auto fields = recognizer->recognize(file, category);
 
 		auto output_path = fmt::format(L"{}_result.txt", boost::filesystem::path(file).native());

@@ -2185,9 +2185,6 @@ namespace selvy {
 					}
 					else if (category == L"BILL OF LADING") {
 						text = boost::regex_replace(text, boost::wregex(L"HOFC"), L"HDFC");
-						text = boost::regex_replace(text, boost::wregex(L"[농눙][협현업럽]"), L"농협");
-						text = boost::regex_replace(text, boost::wregex(L"롯더정보"), L"롯데정보");
-						text = boost::regex_replace(text, boost::wregex(L"뉴스컴되니"), L"뉴스컴퍼니");
 					}
 
 					auto matches = trie.parse_text(text);
@@ -3226,6 +3223,28 @@ namespace selvy {
 			//text = boost::regex_replace(text, boost::wregex(L"»*"), L"**");
 			//text = boost::regex_replace(text, boost::wregex(L"*»"), L"**");
 			//text = boost::regex_replace(text, boost::wregex(L"/?FLIGHT to:?", boost::regex::icase), L"");
+
+			return std::make_pair(std::get<0>(a), text);
+		}
+		
+		inline std::pair<cv::Rect, std::wstring>
+			preprocess_bank_name(const std::pair<cv::Rect, std::wstring>& a)
+		{
+			auto text = std::get<1>(a);
+			text = boost::replace_all_copy(text, L":", L"");
+			text = boost::replace_all_copy(text, L"RES애A BANK", L"RESONA BANK");
+
+			return std::make_pair(std::get<0>(a), text);
+		}
+
+
+		inline std::pair<cv::Rect, std::wstring>
+			preprocess_amount(const std::pair<cv::Rect, std::wstring>& a)
+		{
+			auto text = std::get<1>(a);
+			text = boost::replace_all_copy(text, L":", L"");
+			text = boost::replace_all_copy(text, L"I", L"1");
+			text = boost::replace_all_copy(text, L"0SD", L"USD");
 
 			return std::make_pair(std::get<0>(a), text);
 		}
@@ -12089,34 +12108,14 @@ namespace selvy {
 								fill_field(extracted_fields, L"SHIPMENT DATE", shipment_date);
 								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
 								
-							} else if (class_name == L"CARGO RECEIPT") {
-								const auto place_of_issue = extract_place_of_issue(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto place_of_receipt = extract_place_of_receipt(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
-								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
-								const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
-								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipping_line = extract_shipping_line(configuration, class_name, searched_fields, blocks, image_size);
-								auto agent = extract_agent(configuration, class_name, searched_fields, blocks, image_size);
-
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PLACE OF RECEIPT", std::vector<std::wstring>{place_of_receipt});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::wstring>{place_of_delivery});
-								fill_field(extracted_fields, L"CONSIGNEE", consignee);
-								fill_field(extracted_fields, L"SHIPPER", shipper);
-								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"PLACE OF ISSUE", std::vector<std::wstring>{place_of_issue});
-
-								if (!shipping_line.empty()) {
-									agent.insert(agent.begin(), shipping_line[0]);
-								}
-								fill_field(extracted_fields, L"AGENT", agent);
 							} else if (class_name == L"LETTER OF CREDIT") {
+								const auto swift_mt_sender = extract_swift_mt_sender(configuration, class_name, searched_fields, blocks, image_size);
+								const auto credit_number = extract_credit_number(configuration, class_name, searched_fields, blocks, image_size);
+								const auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size);
+								fill_field(extracted_fields, L"SWIFT MT SENDER", swift_mt_sender);
+								fill_field(extracted_fields, L"CREDIT NUMBER", credit_number);
+								fill_field(extracted_fields, L"AMOUNT", amount);
+								/*
 								//const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
 								const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
 								const auto beneficiary = extract_beneficiary(configuration, class_name, searched_fields, blocks, image_size);
@@ -12135,43 +12134,10 @@ namespace selvy {
 								for (const auto& bank : banks) {
 									fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
 								}
-							} else if (class_name == L"COMMERCIAL INVOICE" || class_name == L"PACKING LIST") {
-								/*
-								const auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
-								//const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
-
-
-								const auto buyer = extract_buyer(configuration, class_name, searched_fields, blocks, image_size);
-								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
-								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
-								const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto exporter = extract_exporter(configuration, class_name, searched_fields, blocks, image_size);
-								const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
-								const auto manufacturer = extract_manufacturer(configuration, class_name, searched_fields, blocks, image_size);
-								const auto importer = extract_importer(configuration, class_name, searched_fields, blocks, image_size);
-
-								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
-								const auto lc_no = extract_lcno(configuration, class_name, searched_fields, blocks, image_size);
-								fill_field(extracted_fields, L"BUYER", buyer);
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
-								fill_field(extracted_fields, L"CONSIGNEE", consignee);
-								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::wstring>{place_of_delivery});
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								//fill_field(extracted_fields, L"EXPORTER", std::vector<std::wstring>{exporter});
-								fill_field(extracted_fields, L"EXPORTER", exporter);
-								fill_field(extracted_fields, L"APPLICANT", applicant);
-								fill_field(extracted_fields, L"MANUFACTURER", manufacturer);
-								fill_field(extracted_fields, L"IMPORTER", importer);
 								*/
-								auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
-								if (seller.empty())
-									seller = extract_exporter(configuration, class_name, searched_fields, blocks, image_size);
+							} else if (class_name == L"COMMERCIAL INVOICE") {
+								
+								const auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
 								const auto lc_no = extract_lcno(configuration, class_name, searched_fields, blocks, image_size);
 								const auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size);
 								fill_field(extracted_fields, L"SELLER", seller);								
@@ -12179,133 +12145,7 @@ namespace selvy {
 								fill_field(extracted_fields, L"AMOUNT", amount);
 								//fill_field(extracted_fields, L"L/C NO", std::vector<std::wstring>{lc_no});
 								//fill_field(extracted_fields, L"GOOD DESCRIPTION", std::vector<std::wstring>{goods});
-							} else if (class_name == L"BILL OF EXCHANGE") {
-								const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
-
-								for (const auto& bank : banks) {
-									fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
-								}
-							} else if (class_name == L"EXPORT PERMIT") {
-								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
-							} else if (class_name == L"CERTIFICATE OF ORIGIN") {
-								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
-								const auto importer = extract_importer(configuration, class_name, searched_fields, blocks, image_size);
-
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
-								fill_field(extracted_fields, L"IMPORTER", importer);
-							} else if (class_name == L"INSURANCE POLICY") {
-								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
-								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
-								const auto insurance_company = extract_insurance_company(configuration, blocks, image_size);
-								const auto insurance_settling_agent = extract_insurance_company(configuration, searched_fields, blocks, image_size, L"INSURANCE SETTLING AGENT");
-								const auto insurance_survey_agent = extract_insurance_company(configuration, searched_fields, blocks, image_size, L"INSURANCE SURVEY AGENT");
-
-								fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::wstring>{insurance_company});
-								fill_field(extracted_fields, L"INSURANCE SETTLING AGENT", std::vector<std::wstring>{std::get<0>(insurance_settling_agent)});
-								fill_field(extracted_fields, L"INSURANCE SETTLING AGENT_CC", std::vector<std::wstring>{std::get<0>(insurance_settling_agent)});
-								fill_field(extracted_fields, L"INSURANCE SURVEY AGENT", std::vector<std::wstring>{std::get<0>(insurance_survey_agent)});
-								fill_field(extracted_fields, L"INSURANCE SURVEY AGENT_CC", std::vector<std::wstring>{std::get<0>(insurance_survey_agent)});
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
-							} else if (class_name == L"SHIPMENT ADVICE") {
-								const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
-								const auto beneficiary = extract_beneficiary(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipping_line = extract_shipping_line(configuration, class_name, searched_fields, blocks, image_size);
-								const auto insurance_company = extract_insurance_company(configuration, searched_fields, blocks, image_size, L"INSURANCE COMPANY");
-								const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
-
-								fill_field(extracted_fields, L"APPLICANT", applicant);
-								fill_field(extracted_fields, L"BENEFICIARY", beneficiary);
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"SHIPPING LINE", std::vector<std::wstring>{shipping_line});
-								fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::wstring>{std::get<0>(insurance_company)});
-								fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::wstring>{std::get<1>(insurance_company)});
-
-								for (const auto& bank : banks) {
-									fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
-								}
-							} else if (class_name == L"CERTIFICATE") {
-								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
-								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
-								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::wstring>{place_of_delivery});
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-							} else if (class_name == L"AIR WAYBILL") {
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
-								const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
-								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-								const auto agent = extract_agent(configuration, class_name, searched_fields, blocks, image_size);
-
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"CONSIGNEE", consignee);
-								fill_field(extracted_fields, L"SHIPEER", shipper);
-								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"AGENT", agent);
-							} else if (class_name == L"REMITTANCE LETTER") {
-								const auto bank = extract_issuing_bank(configuration, class_name, searched_fields, blocks, image_size);
-								const auto drawer = extract_drawer(configuration, class_name, searched_fields, blocks, image_size);
-								fill_field(extracted_fields, L"ISSUING BANK", bank);
-								fill_field(extracted_fields, L"DRAWER", drawer);
-							} else if (class_name == L"FIRM OFFER") {
-								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
-								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
-								const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
-								const auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
-								const auto buyer = extract_buyer(configuration, class_name, searched_fields, blocks, image_size);
-								const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
-
-								fill_field(extracted_fields, L"SELLER", seller);
-								fill_field(extracted_fields, L"BUYER", buyer);
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
-								fill_field(extracted_fields, L"APPLICANT", applicant);
-								for (const auto& bank : banks) {
-									fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
-								}
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
-							} else if (class_name == L"LETTER OF GUARANTEE") {
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
-								const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
-								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipping_company = extract_shipping_company(configuration, class_name, searched_fields, blocks, image_size);
-
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"CONSIGNEE", consignee);
-								fill_field(extracted_fields, L"SHIPEER", shipper);
-								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
-								fill_field(extracted_fields, L"CARRIER", shipping_company);
-							}
+							} 
 
 							fill_field(extracted_fields, L"FILE NAME", std::vector<std::wstring>{file_name});
 
@@ -12363,7 +12203,7 @@ namespace selvy {
 						{ categories[7],{ L"GOODS DESCRIPTION" } },
 						{ categories[8],{ L"INSURANCE COMPANY", L"INSURANCE SETTLING AGENT", L"INSURANCE SURVEY AGENT", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"ORIGIN", L"GOODS DESCRIPTION" } },
 						//{ categories[9],{ L"ISSUING BANK", L"COLLECTING BANK", L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE" } },
-						{ categories[9],{ L"ISSUING BANK", L"AMOUNT", L"CREDIT NO" } },
+						{ categories[9],{ L"SWIFT MT SENDER", L"AMOUNT", L"CREDIT NUMBER" } },
 						{ categories[10],{ L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERTY", L"VESSEL NAME" } },
 						{ categories[11],{ L"ISSUING BANK", L"DRAWER" } },
 						{ categories[12],{ L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"SHIPPING LINE", L"INSURANCE COMPANY" } },
@@ -12703,6 +12543,111 @@ namespace selvy {
 			}
 
 			static std::vector<std::wstring>
+				extract_swift_mt_sender( const configuration& configuration, 
+										const std::wstring& category,
+										const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&	fields, 
+										const std::vector<block>& blocks, 
+										const cv::Size& image_size)
+			{
+				std::vector<std::wstring> extracted_result;
+
+				std::vector<std::pair<cv::Rect, std::wstring>> result;
+				/*
+				result = extract_company_and_address(configuration, category, L"SWIFT MT SENDER", fields, blocks);
+				for (auto& a : result) {
+					extracted_result.emplace_back(to_wstring(a));
+				}
+				*/
+				
+				result = extract_field_values(fields.at(L"SWIFT MT SENDER"), blocks,
+					search_self,
+					preprocess_bank_name,
+					default_extract,
+					postprocess_uppercase);
+				if (result.empty()) {
+					result = extract_field_values(fields.at(L"SWIFT MT SENDER"), blocks,
+						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						preprocess_bank_name,
+						default_extract,
+						postprocess_uppercase);
+					
+					if (result.empty()) {
+						result = extract_field_values(fields.at(L"SWIFT MT SENDER"), blocks,
+							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_bank_name,
+							default_extract,
+							postprocess_uppercase);
+					}
+				}
+				
+				if (result.empty()) {
+					return extracted_result;
+				}
+				else {
+					for (auto& a : result) {
+						extracted_result.emplace_back(to_wstring(a));
+					}
+				}
+
+				if (!extracted_result.empty() && extracted_result.size() > 5) {
+					for (auto i = 0; i < extracted_result.size(); i++) {
+						auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
+						if (str.find(L"BEHEFICIARY") != std::wstring::npos) {
+							extracted_result.resize(i);
+							break;
+						}
+					}
+				}
+				
+				return extracted_result;
+			}
+
+			static std::vector<std::wstring>
+				extract_credit_number(const configuration& configuration,
+									const std::wstring& category,
+									const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&	fields,
+									const std::vector<block>& blocks,
+									const cv::Size& image_size)
+			{
+
+				std::vector<std::wstring> extracted_result;
+				std::vector<std::pair<cv::Rect, std::wstring>> result;
+
+
+				result = extract_field_values(fields.at(L"DOCUMENTARY CREDIT NUMBER"), blocks,
+					search_self,
+					preprocess_amount,
+					default_extract,
+					postprocess_uppercase);
+				if (result.empty()) {
+					result = extract_field_values(fields.at(L"DOCUMENTARY CREDIT NUMBER"), blocks,
+						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						preprocess_amount,
+						default_extract,
+						postprocess_uppercase);
+
+					if (result.empty()) {
+						result = extract_field_values(fields.at(L"DOCUMENTARY CREDIT NUMBER"), blocks,
+							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_amount,
+							default_extract,
+							postprocess_uppercase);
+					}
+				}
+
+				if (result.empty() || to_wstring(result[0]).length() > 50) {
+					return extracted_result;
+				}
+				else {
+					//for (auto& a : result) {
+					extracted_result.emplace_back(to_wstring(result[0]));
+					//}
+				}
+
+				return extracted_result;
+			}
+
+			static std::vector<std::wstring>
 				extract_place_of_receipt(const configuration& configuration, const std::wstring& category,
 				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
 				fields,
@@ -12850,7 +12795,7 @@ namespace selvy {
 				return false;
 			}
 
-#if 1
+
 			static std::vector<std::wstring>
 				extract_lcno(const configuration& configuration, const std::wstring& category,
 					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
@@ -12882,86 +12827,62 @@ namespace selvy {
 					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				std::vector<std::wstring> extracted_result;
+				std::vector<std::pair<cv::Rect, std::wstring>> result;
+				auto isAmount = false;
 
-				auto result = extract_field_values(fields.at(L"AMOUNT"), blocks,
-					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-					default_preprocess,
-					default_extract,
-					default_postprocess);
+				if (category == L"LETTER OF CREDIT") {
+					result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
+						search_self,
+						preprocess_amount,
+						default_extract,
+						default_postprocess);
+
+					if (result.size() == 0) {
+						result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_amount,
+							default_extract,
+							default_postprocess);
+					}
+					else {
+						for (wchar_t c : to_wstring(result[result.size()-1])) {
+							if (std::isdigit(c) != 0) {
+								isAmount = true;
+								break;
+							}
+						}
+
+						if (!isAmount) {
+							result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
+								std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+								preprocess_amount,
+								default_extract,
+								default_postprocess);
+						}
+					}
+
+				} else if (category == L"COMMERCIAL INVOICE") {
+					result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						preprocess_amount,
+						default_extract,
+						default_postprocess);
+				}
+				
 
 				if (result.empty())
 					return std::vector<std::wstring>();
 
-				for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(a));
-				}
+				//for (auto& a : result) {
+					extracted_result.emplace_back(to_wstring(result[result.size() - 1]));
+				//}
 
 				return extracted_result;
 
 				//return extract_company_and_address(configuration, category, L"L/C NO", fields, blocks);
 			}
-#else
-			static std::wstring
-				extract_lcno(const configuration& configuration, const std::wstring& category,
-					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-					const std::vector<block>& blocks, const cv::Size& image_size)
-			{
-				if (fields.find(L"L/C NO") == fields.end())
-					return L"";
-				//spdlog::get("recognizer")->info("{} : {} : [{}],[{}]", __FUNCTION__, __LINE__, fields.at(L"L/C NO"), blocks);
-				
-				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> filtered_fields;
-				std::copy_if(std::begin(fields.at(L"L/C NO")), std::end(fields.at(L"L/C NO")), std::back_inserter(filtered_fields), [](const std::tuple<cv::Rect, std::wstring, cv::Range>& field) {
-					const auto text = std::get<1>(field);
-					if (boost::regex_search(text, boost::wregex(L"^to|^from", boost::regex::icase)))
-						return true;
-					if (boost::regex_search(text, boost::wregex(L"\\s+to:", boost::regex::icase)))
-						return false;
-					return true;
-				});
 
 
-				std::vector<std::pair<cv::Rect, std::wstring>> lcno;
-				
-				lcno = extract_field_values(fields.at(L"L/C"), blocks,
-					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.15, 1, 100, true, false, false),
-					default_preprocess,
-					default_extract,
-					postprocess_uppercase);
-
-				/*
-				lcno = extract_field_values(fields.at(L"L/C"), blocks,
-					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2, false, false, false),
-					default_preprocess,
-					default_extract,
-					default_postprocess);
-
-				if (lcno.empty()) {
-					lcno = extract_field_values(filtered_fields, blocks,
-						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 8, true),
-						default_preprocess,
-						default_extract,
-						default_postprocess);
-
-					if (lcno.empty()) {
-						lcno = extract_field_values(filtered_fields, blocks,
-							search_self,
-							default_preprocess,
-							default_extract,
-							default_postprocess);
-					}
-				}
-				*/
-				/*
-				boost::remove_erase_if(lcno, [](const std::pair<cv::Rect, std::wstring>& vessel) {
-					return boost::regex_search(std::get<1>(vessel), boost::wregex(L"TO BE (?:DECLARED|ADVISED)", boost::regex_constants::icase)); });
-				*/
-				if (lcno.empty())
-					return L"";
-
-				return std::get<1>(lcno[0]);
-			}
-#endif
 			static bool
 				find_address_country(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category, const int line_index)
 			{
@@ -14379,26 +14300,7 @@ namespace selvy {
 
 					return extracted_result;
 				}
-				/*
-				if (fields.at(L"SELLER").size() > 0) {
-					const auto paper = image_size;
-					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> up_side_field;
-					for (auto& field : fields.at(L"SELLER")) {
-						auto rect = to_rect(field);
-						if (rect.y < paper.height * 2 / 5) {
-							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
-							new_field.emplace_back(field);
-							up_side_field.insert(std::make_pair(L"SELLER", new_field));
-							break;
-						}
-					}
-					if (up_side_field.find(L"SELLER") == up_side_field.end())
-						return std::vector<std::wstring>();
-
-					return extract_company_and_address(configuration, category, L"SELLER", up_side_field, blocks);
-				}
-				return extract_company_and_address(configuration, category, L"SELLER", fields, blocks);
-				*/
+				
 			}
 
 			static std::vector<std::wstring>
@@ -14544,13 +14446,6 @@ namespace selvy {
 
 
 				std::vector<std::pair<cv::Rect, std::wstring>> ret;
-				/*
-				lcno = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
-				std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2, false, false, false),
-				preprocess_vessel_name,
-				default_extract,
-				std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
-				*/
 
 				ret = extract_field_values(fields.at(L"EXPORTER"), blocks,
 					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2, false, false, false),

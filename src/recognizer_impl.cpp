@@ -3237,13 +3237,24 @@ namespace selvy {
 			return std::make_pair(std::get<0>(a), text);
 		}
 
+		inline std::pair<cv::Rect, std::wstring>
+			preprocess_sender(const std::pair<cv::Rect, std::wstring>& a)
+		{
+			auto text = std::get<1>(a);
+			text = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z0-9\\., ]"), L"");
+			//text = boost::replace_all_copy(text, L":", L"");
+			//text = boost::replace_all_copy(text, L"RES애A BANK", L"RESONA BANK");
+
+			return std::make_pair(std::get<0>(a), text);
+		}
+
 
 		inline std::pair<cv::Rect, std::wstring>
 			preprocess_amount(const std::pair<cv::Rect, std::wstring>& a)
 		{
 			auto text = std::get<1>(a);
 			text = boost::replace_all_copy(text, L":", L"");
-			text = boost::replace_all_copy(text, L"I", L"1");
+			text = boost::replace_all_copy(text, L"1LC", L"ILC");
 			text = boost::replace_all_copy(text, L"0SD", L"USD");
 
 			return std::make_pair(std::get<0>(a), text);
@@ -3489,6 +3500,31 @@ namespace selvy {
 						for (auto i = 1; i < matches.size(); i++) {
 							const auto matched = std::wstring(matches[i].first, matches[i].second);
 
+							if (!matched.empty())
+								return matched;
+						}
+					}
+				}
+
+				return L"";
+			};
+		}
+
+		inline std::function<std::wstring(const std::pair<cv::Rect, std::wstring>&)>
+			create_extract_sender(const std::wstring& regex)
+		{
+			return [&](const std::pair<cv::Rect, std::wstring>& line) -> std::wstring {
+				boost::wregex re(regex, boost::regex_constants::icase);
+				boost::match_results<std::wstring::const_iterator> matches;
+				const auto text = std::get<1>(line);
+
+				//text = std::to_wstring(boost::replace_all_copy(text, L"SWIFT MT SENDER", L""));
+
+				if (boost::regex_search(std::begin(text), std::end(text), matches, re)) {
+					if (!matches.empty()) {
+						for (auto i = 1; i < matches.size(); i++) {
+							const auto matched = std::wstring(matches[i].first, matches[i].second);
+							
 							if (!matched.empty())
 								return matched;
 						}
@@ -12550,21 +12586,39 @@ namespace selvy {
 										const cv::Size& image_size)
 			{
 				std::vector<std::wstring> extracted_result;
+				
 
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
-				/*
-				result = extract_company_and_address(configuration, category, L"SWIFT MT SENDER", fields, blocks);
-				for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(a));
-				}
-				*/
+
 				
 				result = extract_field_values(fields.at(L"SWIFT MT SENDER"), blocks,
 					search_self,
-					preprocess_bank_name,
+					preprocess_sender,
+					//create_extract_sender(L"SWIFT MT SENDER"),
 					default_extract,
 					postprocess_uppercase);
-				if (result.empty()) {
+				
+				if (!result.empty() ) {
+					for (auto& a : result) {
+						auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(to_wstring(a)));
+
+						if (str.find(L"SWIFT MT SENDER") != std::wstring::npos) {
+							str = boost::replace_all_copy(str, L"SWIFT MT SENDER", L"");
+							if (str.size() <= 0) {
+								result.clear();
+							}
+							else {
+								result.clear();
+								extracted_result.emplace_back(boost::replace_all_copy(str, L"SWIFT MT SENDER", L""));
+							}
+							break;
+						}
+						
+					}
+				}
+				//extracted_result = find(result.begin(), result.end(), L"SWIFT MT SENDER");
+				
+				if (result.empty() && extracted_result.empty()) {
 					result = extract_field_values(fields.at(L"SWIFT MT SENDER"), blocks,
 						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 						preprocess_bank_name,
@@ -12579,6 +12633,8 @@ namespace selvy {
 							postprocess_uppercase);
 					}
 				}
+
+
 				
 				if (result.empty()) {
 					return extracted_result;
@@ -12587,14 +12643,16 @@ namespace selvy {
 					for (auto& a : result) {
 						extracted_result.emplace_back(to_wstring(a));
 					}
-				}
 
-				if (!extracted_result.empty() && extracted_result.size() > 5) {
-					for (auto i = 0; i < extracted_result.size(); i++) {
-						auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
-						if (str.find(L"BEHEFICIARY") != std::wstring::npos) {
-							extracted_result.resize(i);
-							break;
+					if (extracted_result.size() > 5) {
+						for (auto i = 0; i < extracted_result.size(); i++) {
+							auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
+							if (str.find(L"BEHEFICIARY") != std::wstring::npos ||
+								str.find(L"BENEFICIARY") != std::wstring::npos ||
+								str.find(L"BENEBWWT") != std::wstring::npos) {
+								extracted_result.resize(i);
+								break;
+							}
 						}
 					}
 				}
@@ -12837,30 +12895,14 @@ namespace selvy {
 						default_extract,
 						default_postprocess);
 
-					if (result.size() == 0) {
+					if (result.empty()) {
 						result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
 							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 							preprocess_amount,
 							default_extract,
 							default_postprocess);
 					}
-					else {
-						for (wchar_t c : to_wstring(result[result.size()-1])) {
-							if (std::isdigit(c) != 0) {
-								isAmount = true;
-								break;
-							}
-						}
-
-						if (!isAmount) {
-							result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
-								std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
-								preprocess_amount,
-								default_extract,
-								default_postprocess);
-						}
-					}
-
+					
 				} else if (category == L"COMMERCIAL INVOICE") {
 					result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
 						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
@@ -12874,7 +12916,7 @@ namespace selvy {
 					return std::vector<std::wstring>();
 
 				//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[result.size() - 1]));
+					extracted_result.emplace_back(to_wstring(result[0]));
 				//}
 
 				return extracted_result;

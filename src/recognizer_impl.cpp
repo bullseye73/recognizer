@@ -1,7 +1,7 @@
 ﻿#ifndef __SERVICE_MODULE__
 #define __USE_CACHE__ true
 #define __USE_INPROC__ true
-#define __USE_ENGINE__ 1
+#define __USE_ENGINE__ 0
 #else
 #define __USE_CACHE__ false
 #define __USE_INPROC__ false
@@ -12884,7 +12884,7 @@ namespace selvy {
 				return false;
 			}
 
-
+			/*
 			static std::vector<std::wstring>
 				extract_lcno(const configuration& configuration, const std::wstring& category,
 					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
@@ -12909,7 +12909,7 @@ namespace selvy {
 
 				//return extract_company_and_address(configuration, category, L"L/C NO", fields, blocks);
 			}
-
+			*/
 			static std::wstring
 				extract_lc_number(const configuration& configuration, const std::wstring& category,
 					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
@@ -13050,6 +13050,21 @@ namespace selvy {
 							preprocess_amount,
 							default_extract,
 							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));
+				} else if (category == L"LETTER OF CREDIT") {
+					total = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
+						search_self,
+						preprocess_amount,
+						default_extract,
+						default_postprocess);
+
+					if (total.empty()) {
+						total = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_amount,
+							default_extract,
+							default_postprocess);
+					}
+
 				}
 
 

@@ -13139,26 +13139,66 @@ namespace selvy {
 				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
 				const std::vector<block>& blocks, const cv::Size& image_size)
 			{
-				if (fields.find(L"NOTIFY") == fields.end())
-					return std::vector<std::wstring>();
-				if (fields.at(L"NOTIFY").size() > 0) {
-					const auto paper = image_size;
-					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> up_side_field;
-					for (auto& field : fields.at(L"NOTIFY")) {
-						auto rect = to_rect(field);
-						if (rect.y < paper.height * 2 / 5) {
-							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
-							new_field.emplace_back(field);
-							up_side_field.insert(std::make_pair(L"NOTIFY", new_field));
-							break;
+				const auto FIELD_NAME = L"NOTIFY";
+
+				std::vector<std::wstring> extracted_result;
+
+				std::vector<std::pair<cv::Rect, std::wstring>> result;
+
+				const auto paper = image_size;
+				std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> left_side_field;
+				for (auto& field : fields.at(FIELD_NAME)) {
+					auto rect = to_rect(field);
+
+					if (rect.x < paper.width / 4 && rect.y < paper.height / 2) {
+						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+						new_field.emplace_back(field);
+						left_side_field.insert(std::make_pair(FIELD_NAME, new_field));
+						break;
+					}
+				}
+
+				if (category == L"BILL OF LADING") {
+					if (left_side_field.find(FIELD_NAME) != left_side_field.end())
+						result = extract_field_values(left_side_field.at(FIELD_NAME), blocks,
+							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true),
+							default_preprocess,
+							//create_extract_function(L"(?:ORDER OF )(.*)"),
+							default_extract,
+							postprocess_uppercase);
+				}
+				else {
+					result = extract_field_values(fields.at(FIELD_NAME), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
+						default_preprocess,
+						create_extract_function(L"(?:ORDER OF )(.*)"),
+						postprocess_uppercase);
+				}
+
+				if (result.empty()) {
+					if (category == L"BILL OF LADING" ) {
+						extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, left_side_field, blocks);
+						if (!extracted_result.empty() && extracted_result.size() > 5) {
+							for (auto i = 0; i < extracted_result.size(); i++) {
+								auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
+								if (str.find(FIELD_NAME) != std::wstring::npos) {
+									extracted_result.resize(i);
+									break;
+								}
+							}
 						}
 					}
-					if (up_side_field.find(L"NOTIFY") == up_side_field.end())
-						return std::vector<std::wstring>();
-
-					return extract_company_and_address(configuration, category, L"NOTIFY", up_side_field, blocks);
+					else {
+						extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, fields, blocks);
+					}
 				}
-				return extract_company_and_address(configuration, category, L"NOTIFY", fields, blocks);
+				else {
+					for (auto& a : result) {
+						extracted_result.emplace_back(to_wstring(a));
+					}
+				}
+
+				return extracted_result;
 			}
 
 			static std::vector<std::wstring>

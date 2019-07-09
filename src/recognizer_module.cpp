@@ -129,8 +129,8 @@ main()
 	std::sort(std::begin(files), std::end(files), compareNat);
 
 	for (const auto& file : files) {
-		//auto category = L"BILL OF LADING";// categories[14];
-		auto category = L"LETTER OF CREDIT"; //
+		auto category = L"BILL OF LADING";// categories[14];
+		//auto category = L"LETTER OF CREDIT"; //
 		//auto category = L"COMMERCIAL INVOICE";
 		const auto fields = recognizer->recognize(file, category);
 

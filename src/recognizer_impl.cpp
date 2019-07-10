@@ -12197,20 +12197,13 @@ namespace selvy {
 							} else if (class_name == L"COMMERCIAL INVOICE") {
 								
 								const auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
-								//const auto lc_no = extract_lcno(configuration, class_name, searched_fields, blocks, image_size);
-								//const auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size);
 								const auto lc_number = extract_lc_number(configuration, class_name, searched_fields, blocks, image_size);
 								const auto currency_sign = extract_currency_sign(configuration, class_name, searched_fields, blocks, image_size);
 								const auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size);
 								std::wstring currency_amount = currency_sign + amount ;
 								fill_field(extracted_fields, L"SELLER", seller);								
-								//fill_field(extracted_fields, L"L/C NO", lc_no);
-								//fill_field(extracted_fields, L"AMOUNT", amount);
 								fill_field(extracted_fields, L"L/C NO", std::vector<std::wstring>{lc_number});
-								//fill_field(extracted_fields, L"CURRENCY SIGN", std::vector<std::wstring>{currency_sign});
 								fill_field(extracted_fields, L"AMOUNT", std::vector<std::wstring>{currency_amount});
-								//fill_field(extracted_fields, L"L/C NO", std::vector<std::wstring>{lc_no});
-								//fill_field(extracted_fields, L"GOOD DESCRIPTION", std::vector<std::wstring>{goods});
 							} 
 
 							fill_field(extracted_fields, L"FILE NAME", std::vector<std::wstring>{file_name});
@@ -12355,121 +12348,35 @@ namespace selvy {
 
 				std::vector<std::pair<cv::Rect, std::wstring>> port_name;
 
-				if (category == L"LETTER OF CREDIT" || category == L"INSURANCE POLICY" || category == L"CERTIFICATE") {
+				if (category == L"BILL OF LADING") {
 					port_name = extract_field_values(filtered_fields, blocks,
 						search_self,
 						std::bind(&trade_document_recognizer::preprocess_port_name,
-						std::placeholders::_1,
-						configuration, L"countries"),
-						create_extract_function(configuration, L"ports", 2),
-						postprocess_uppercase);
-
-					if (port_name.empty()) {
-						port_name = extract_field_values(filtered_fields, blocks,
-							search_self,
-							std::bind(&trade_document_recognizer::preprocess_country_port_name,
-							std::placeholders::_1,
-							configuration, L"countries", false),
-							create_extract_function(L"(?:ANY (.*) PORT|ANY PORT IN (.*))"),
-							create_postprocess_function(configuration, L"country-countrycode2.csv"));
-					}
-
-					if (port_name.empty()) {
-						port_name = extract_field_values(filtered_fields, blocks,
-							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							std::bind(&trade_document_recognizer::preprocess_country_port_name,
-							std::placeholders::_1,
-							configuration, L"countries", true),
-							default_extract,
-							create_postprocess_function(configuration, L"country-countrycode2.csv"));
-					}
-
-					if (port_name.empty()) {
-						port_name = extract_field_values(filtered_fields, blocks,
-							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							std::bind(&trade_document_recognizer::preprocess_port_name,
-							std::placeholders::_1, configuration, L"countries"),
-							create_extract_function(configuration, L"ports", 2),
-							postprocess_uppercase);
-					}
-
-					if (port_name.empty()) {
-						port_name = extract_field_values(filtered_fields, blocks,
-							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							std::bind(&trade_document_recognizer::preprocess_country_port_name,
-							std::placeholders::_1,
-							configuration, L"countries", false),
-							create_extract_function(L"(?:ANY (.*) PORT|ANY PORT IN (.*))"),
-							create_postprocess_function(configuration, L"country-countrycode2.csv"));
-					}
-
-					if (port_name.empty()) {
-						if (category == L"INSURANCE POLICY") {
-							port_name = extract_field_values(filtered_fields, blocks,
-								std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
-								std::bind(&trade_document_recognizer::preprocess_country_port_name,
-								std::placeholders::_1,
-								configuration, L"countries", true),
-								default_extract,
-								create_postprocess_function(configuration, L"country-countrycode2.csv"));
-
-							if (port_name.empty()) {
-								port_name = extract_field_values(filtered_fields, blocks,
-									std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2.5, false, false, false),
-									std::bind(&trade_document_recognizer::preprocess_port_name,
-									std::placeholders::_1,
-									configuration, L"countries"),
-									create_extract_function(configuration, L"ports", 2),
-									postprocess_uppercase);
-							}
-
-							if (port_name.empty()) {
-								port_name = extract_field_values(filtered_fields, blocks,
-									std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
-									std::bind(&trade_document_recognizer::preprocess_country_port_name,
-									std::placeholders::_1,
-									configuration, L"countries", false),
-									create_extract_function(L"(?:ANY (.*) PORT|ANY PORT IN (.*))"),
-									create_postprocess_function(configuration, L"country-countrycode2.csv"));
-							}
-						}
-					}
-				}
-				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST" || category == L"SHIPMENT ADVICE") {
-					port_name = extract_field_values(filtered_fields, blocks,
-						search_self,
-						std::bind(&trade_document_recognizer::preprocess_port_name,
-						std::placeholders::_1,
-						configuration, L"countries"),
-						create_extract_function(configuration, L"ports", 2),
-						postprocess_uppercase);
-					if (port_name.empty()) {
-						port_name = extract_field_values(filtered_fields, blocks,
-							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							std::bind(&trade_document_recognizer::preprocess_port_name,
 							std::placeholders::_1,
 							configuration, L"countries"),
-							create_extract_function(configuration, L"ports", 2),
-							postprocess_uppercase);
-					}
+						create_extract_function(configuration, L"ports", 2),
+						postprocess_uppercase);
+
 					if (port_name.empty()) {
 						port_name = extract_field_values(filtered_fields, blocks,
 							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 100, false, false, false),
 							std::bind(&trade_document_recognizer::preprocess_port_name,
-							std::placeholders::_1,
-							configuration, L"countries"),
+								std::placeholders::_1,
+								configuration, L"countries"),
 							create_extract_function(configuration, L"ports", 2),
 							postprocess_uppercase);
 					}
-				}
-				else if (category == L"BILL OF LADING" || category == L"CARGO RECEIPT") {
-					port_name = extract_field_values(filtered_fields, blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 100, false, false, false),
-						std::bind(&trade_document_recognizer::preprocess_port_name,
-						std::placeholders::_1,
-						configuration, L"countries"),
-						create_extract_function(configuration, L"ports", 2),
-						postprocess_uppercase);
+
+					if (port_name.empty()) {
+						port_name = extract_field_values(filtered_fields, blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							std::bind(&trade_document_recognizer::preprocess_port_name,
+								std::placeholders::_1,
+								configuration, L"countries"),
+							create_extract_function(configuration, L"ports", 2),
+							postprocess_uppercase);
+					}
+					
 				}
 				else if (category == L"AIR WAYBILL") {
 					port_name = extract_field_values(filtered_fields, blocks,
@@ -12555,30 +12462,81 @@ namespace selvy {
 				fields,
 				const std::vector<block>& blocks, const cv::Size& image_size)
 			{
+
+				const std::wstring FIELD_NAME = L"PORT OF LOADING";
 				std::vector<std::wstring> extracted_result;
-
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
+#if 0
+				const auto paper = image_size;
+				std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> left_side_field;
+				for (auto& field : fields.at(FIELD_NAME)) {
+					auto rect = to_rect(field);
 
-				//if (category == L"BILL OF LADING" ) {
-					//if (left_side_field.find(L"PORT OF LOADING") != left_side_field.end())
-					result = extract_field_values(fields.at(L"PORT OF LOADING"), blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
-						preprocess_port_of_loading,
-						default_extract,
-						postprocess_uppercase);
-				//}
+					if (rect.x < paper.width / 4 && rect.y < paper.height / 2) {
+						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+						new_field.emplace_back(field);
+						left_side_field.insert(std::make_pair(FIELD_NAME, new_field));
+						break;
+					}
+				}
 
-				
+				if (result.empty()) {
+					if (category == L"BILL OF LADING") {
+						extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, left_side_field, blocks);
+						if (!extracted_result.empty() && extracted_result.size() > 5) {
+							for (auto i = 0; i < extracted_result.size(); i++) {
+								auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
+								if (str.find(FIELD_NAME) != std::wstring::npos) {
+									extracted_result.resize(i);
+									break;
+								}
+							}
+						}
+					}
+					else {
+						extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, fields, blocks);
+					}
+				}
+				else {
+					for (auto& a : result) {
+						extracted_result.emplace_back(to_wstring(a));
+					}
+				}
+				return extracted_result;
+#else
+				result = extract_field_values(fields.at(FIELD_NAME), blocks,
+					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+					default_preprocess,
+					default_extract,
+					postprocess_uppercase);
+
 				if (result.empty() || to_wstring(result[0]).length() > 50) {
 					return extracted_result;
 				}
 				else {
 					//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[0]));
+						auto value = to_wstring(result[0]);
+						value = boost::regex_replace(value, boost::wregex(L"190 I"), L"1901");
+						value = boost::regex_replace(value, boost::wregex(L"[0-9]{3,5}[A-Z] "), L"");
+						extracted_result.emplace_back(value);
 					//}
 				}
 
+				if (result.empty()) {
+					result = extract_field_values(fields.at(FIELD_NAME), blocks,
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						preprocess_sender,
+						default_extract,
+						postprocess_uppercase);
+				}
+
+
+				if (result.empty() || to_wstring(result[0]).length() > 50) {
+					return extracted_result;
+				}
+
 				return extracted_result;
+#endif
 			}
 
 			static std::vector<std::wstring>
@@ -12764,26 +12722,29 @@ namespace selvy {
 				return extracted_result;
 			}
 
+
 			static std::vector<std::wstring>
 				extract_port_of_discharge(const configuration& configuration, const std::wstring& category,
 				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
 				fields,
 				const std::vector<block>& blocks, const cv::Size& image_size)
 			{
+				const std::wstring FIELD_NAME = L"PORT OF DISCHARGE";
 				std::vector<std::wstring> extracted_result;
-
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
+				
+#if 0				
 
-				result = extract_field_values(fields.at(L"PORT OF DISCHARGE"), blocks,
+				result = extract_field_values(fields.at(FIELD_NAME), blocks,
 					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
-					//std::bind(&trade_document_recognizer::preprocess_port_of_discharge, std::placeholders::_1, configuration, L"PORT OF DISCHARGE"),
+					//std::bind(&trade_document_recognizer::preprocess_port_of_discharge, std::placeholders::_1, configuration, FIELD_NAME),
 					//default_preprocess,
 					preprocess_port_of_discharge,
 					default_extract,
 					postprocess_discharge);
 
 				if (result.empty()) {
-					result = extract_field_values(fields.at(L"PORT OF DISCHARGE"), blocks,
+					result = extract_field_values(fields.at(FIELD_NAME), blocks,
 						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 						preprocess_port_of_discharge,
 						default_extract,
@@ -12803,6 +12764,38 @@ namespace selvy {
 				}
 
 				return extracted_result;
+#else
+				result = extract_field_values(fields.at(FIELD_NAME), blocks,
+					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+					default_preprocess,
+					default_extract,
+					postprocess_uppercase);
+
+				if (result.empty() || to_wstring(result[0]).length() > 50) {
+					return extracted_result;
+				}
+				else {
+					for (auto& a : result) {
+						extracted_result.emplace_back(to_wstring(a));
+					}
+				}
+
+				if (result.empty()) {
+					result = extract_field_values(fields.at(FIELD_NAME), blocks,
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						preprocess_sender,
+						default_extract,
+						postprocess_uppercase);
+				}
+
+
+				if (result.empty() || to_wstring(result[0]).length() > 50) {
+					return extracted_result;
+				}
+
+				return extracted_result;
+#endif
+				
 			}
 
 			static std::vector<std::wstring>
@@ -12884,32 +12877,7 @@ namespace selvy {
 				return false;
 			}
 
-			/*
-			static std::vector<std::wstring>
-				extract_lcno(const configuration& configuration, const std::wstring& category,
-					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-					const std::vector<block>& blocks, const cv::Size& image_size)
-			{
-				std::vector<std::wstring> extracted_lcno;
-
-				auto result = extract_field_values(fields.at(L"L/C NO"), blocks,
-						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-						default_preprocess, 
-						default_extract, 
-						default_postprocess);
-
-				if (result.empty())
-					return std::vector<std::wstring>();
-				
-				for (auto& a : result) {
-					extracted_lcno.emplace_back(to_wstring(a));
-				}
-
-				return extracted_lcno;
-
-				//return extract_company_and_address(configuration, category, L"L/C NO", fields, blocks);
-			}
-			*/
+			
 			static std::wstring
 				extract_lc_number(const configuration& configuration, const std::wstring& category,
 					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
@@ -13182,7 +13150,8 @@ namespace selvy {
 				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
 				const std::vector<block>& blocks, const cv::Size& image_size)
 			{
-				if (fields.find(L"CONSIGNEE") == fields.end())
+				const std::wstring FIELD_NAME = L"CONSIGNEE";
+				if (fields.find(FIELD_NAME) == fields.end())
 					return std::vector<std::wstring>();
 
 				std::vector<std::wstring> extracted_consignee;
@@ -13191,49 +13160,35 @@ namespace selvy {
 
 				const auto paper = image_size;
 				std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> left_side_field;
-				for (auto& field : fields.at(L"CONSIGNEE")) {
+				for (auto& field : fields.at(FIELD_NAME)) {
 					auto rect = to_rect(field);
 
 					if (rect.x < paper.width / 4 && rect.y < paper.height / 2) {
 						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
 						new_field.emplace_back(field);
-						left_side_field.insert(std::make_pair(L"CONSIGNEE", new_field));
+						left_side_field.insert(std::make_pair(FIELD_NAME, new_field));
 						break;
 					}
 				}
 
-				if (category == L"BILL OF LADING" || category == L"CARGO RECEIPT") {
-					if (left_side_field.find(L"CONSIGNEE") != left_side_field.end())
-						consignee = extract_field_values(left_side_field.at(L"CONSIGNEE"), blocks,
+				if (category == L"BILL OF LADING") {
+					if (left_side_field.find(FIELD_NAME) != left_side_field.end())
+						consignee = extract_field_values(left_side_field.at(FIELD_NAME), blocks,
 						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
 						default_preprocess,
 						//create_extract_function(L"(?:ORDER OF )(.*)"),
 						default_extract,
 						postprocess_uppercase);
 				}
-				else if (category == L"LETTER OF GUARANTEE") {
-					consignee = extract_field_values(fields.at(L"CONSIGNEE"), blocks,
-						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 1.0, 10, true),
-						default_preprocess,
-						create_extract_function(L"(?:ORDER OF )(.*)"),
-						postprocess_uppercase);
-
-					if (!consignee.empty()) {
-						const auto same_blocks = find_nearest_down_lines(to_block(consignee[0]), blocks, 0.5, 0.0, 2, true);
-						std::transform(std::begin(same_blocks), std::end(same_blocks), std::back_inserter(consignee), [](const std::pair<cv::Rect, std::wstring>& line) {
-							return std::make_pair(std::get<0>(line), postprocess_uppercase(std::get<1>(line)));
-						});
-					}
-				}
-				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST") {
-					consignee = extract_field_values(fields.at(L"CONSIGNEE"), blocks,
+				else if (category == L"COMMERCIAL INVOICE") {
+					consignee = extract_field_values(fields.at(FIELD_NAME), blocks,
 						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
 						default_preprocess,
 						default_extract,	//create_extract_function(L"(?:ORDER OF )(.*)"),
 						postprocess_uppercase);
 
 					if (!consignee.empty()) {
-						consignee = extract_field_values(fields.at(L"CONSIGNEE"), blocks,
+						consignee = extract_field_values(fields.at(FIELD_NAME), blocks,
 							search_self,
 							std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
 							configuration, L"companies"),
@@ -13242,7 +13197,7 @@ namespace selvy {
 					}
 				}
 				else {
-					consignee = extract_field_values(fields.at(L"CONSIGNEE"), blocks,
+					consignee = extract_field_values(fields.at(FIELD_NAME), blocks,
 						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
 						default_preprocess,
 						create_extract_function(L"(?:ORDER OF )(.*)"),
@@ -13250,25 +13205,16 @@ namespace selvy {
 				}
 
 				if (consignee.empty()) {
-					if (category == L"BILL OF LADING" || category == L"CARGO RECEIPT") {
-						extracted_consignee = extract_company_and_address(configuration, category, L"CONSIGNEE", left_side_field, blocks);
-						if (!extracted_consignee.empty() && extracted_consignee.size() > 5) {
-							for (auto i = 0; i < extracted_consignee.size(); i++) {
-								auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_consignee[i]));
-								if (str.find(L"NOTIFY PARTY") != std::wstring::npos) {
-									extracted_consignee.resize(i);
-									break;
-								}
-							}
-						}
-					}
-					else {
-						extracted_consignee = extract_company_and_address(configuration, category, L"CONSIGNEE", fields, blocks);
-					}
+					extracted_consignee = extract_company_and_address(configuration, category, FIELD_NAME, fields, blocks);
 				}
 				else {
 					for (auto& a : consignee) {
-						extracted_consignee.emplace_back(to_wstring(a));
+						auto value = to_wstring(a);
+						value = boost::regex_replace(value, boost::wregex(L"([tT]{1}EL)(.*)"), L"");
+						value = boost::regex_replace(value, boost::wregex(L"([tT]{1}ax)(.*)"), L"");
+						value = boost::regex_replace(value, boost::wregex(L"([fF]{1}ax)(.*)"), L"");
+						value = boost::regex_replace(value, boost::wregex(L"(ATTN)(.*)"), L"");
+						extracted_consignee.emplace_back(value);
 					}
 				}
 
@@ -13334,7 +13280,7 @@ namespace selvy {
 				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
 				const std::vector<block>& blocks, const cv::Size& image_size)
 			{
-				const auto FIELD_NAME = L"NOTIFY";
+				const std::wstring FIELD_NAME = L"NOTIFY";
 
 				std::vector<std::wstring> extracted_result;
 
@@ -13342,7 +13288,7 @@ namespace selvy {
 
 				const auto paper = image_size;
 				std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> left_side_field;
-				for (auto& field : fields.at(FIELD_NAME)) {
+				for (auto& field : fields.at(L"NOTIFY")) {
 					auto rect = to_rect(field);
 
 					if (rect.x < paper.width / 4 && rect.y < paper.height / 2) {
@@ -13352,15 +13298,16 @@ namespace selvy {
 						break;
 					}
 				}
-
+				/*
 				if (category == L"BILL OF LADING") {
-					if (left_side_field.find(FIELD_NAME) != left_side_field.end())
-						result = extract_field_values(left_side_field.at(FIELD_NAME), blocks,
-							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true),
-							default_preprocess,
-							//create_extract_function(L"(?:ORDER OF )(.*)"),
-							default_extract,
-							postprocess_uppercase);
+
+					result = extract_field_values(fields.at(FIELD_NAME), blocks,
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false), //, false, false),
+						//std::bind(&trade_document_recognizer::preprocess_port_of_discharge, std::placeholders::_1, configuration, L"PORT OF DISCHARGE"),
+						//default_preprocess,
+						preprocess_port_of_discharge,
+						default_extract,
+						postprocess_discharge);
 				}
 				else {
 					result = extract_field_values(fields.at(FIELD_NAME), blocks,
@@ -13369,17 +13316,16 @@ namespace selvy {
 						create_extract_function(L"(?:ORDER OF )(.*)"),
 						postprocess_uppercase);
 				}
+				*/
 
 				if (result.empty()) {
-					if (category == L"BILL OF LADING" ) {
-						extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, left_side_field, blocks);
-						if (!extracted_result.empty() && extracted_result.size() > 5) {
-							for (auto i = 0; i < extracted_result.size(); i++) {
-								auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
-								if (str.find(FIELD_NAME) != std::wstring::npos) {
-									extracted_result.resize(i);
-									break;
-								}
+					extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, left_side_field, blocks);
+					if (!extracted_result.empty() && extracted_result.size() > 5) {
+						for (auto i = 0; i < extracted_result.size(); i++) {
+							auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
+							if (str.find(FIELD_NAME) != std::wstring::npos) {
+								extracted_result.resize(i);
+								break;
 							}
 						}
 					}

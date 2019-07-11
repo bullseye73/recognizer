@@ -3241,6 +3241,7 @@ namespace selvy {
 			preprocess_sender(const std::pair<cv::Rect, std::wstring>& a)
 		{
 			auto text = std::get<1>(a);
+			text = boost::regex_replace(text, boost::wregex(L"SWIFT MT SENDER"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z0-9\\., ]"), L"");
 			//text = boost::replace_all_copy(text, L":", L"");
 			//text = boost::replace_all_copy(text, L"RES애A BANK", L"RESONA BANK");
@@ -12566,7 +12567,8 @@ namespace selvy {
 
 				return extracted_result;
 			}
-
+			
+			// LC recognition
 			static std::vector<std::wstring>
 				extract_swift_mt_sender( const configuration& configuration, 
 										const std::wstring& category,
@@ -12574,57 +12576,52 @@ namespace selvy {
 										const std::vector<block>& blocks, 
 										const cv::Size& image_size)
 			{
+				const std::wstring FIELD_NAME = L"SWIFT MT SENDER";
 				std::vector<std::wstring> extracted_result;
-				
-
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
 
-				
-				result = extract_field_values(fields.at(L"SWIFT MT SENDER"), blocks,
+				result = extract_field_values(fields.at(FIELD_NAME), blocks,
 					search_self,
 					preprocess_sender,
-					//create_extract_sender(L"SWIFT MT SENDER"),
 					default_extract,
 					postprocess_uppercase);
-				
-				if (!result.empty() ) {
+
+				if (!result.empty()) {
 					for (auto& a : result) {
 						auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(to_wstring(a)));
 
-						if (str.find(L"SWIFT MT SENDER") != std::wstring::npos) {
-							str = boost::replace_all_copy(str, L"SWIFT MT SENDER", L"");
+						if (str.find(FIELD_NAME) != std::wstring::npos) {
+							str = boost::replace_all_copy(str, FIELD_NAME, L"");
 							if (str.size() <= 0) {
 								result.clear();
 							}
 							else {
 								result.clear();
-								extracted_result.emplace_back(boost::replace_all_copy(str, L"SWIFT MT SENDER", L""));
+								extracted_result.emplace_back(str);
 							}
 							break;
 						}
-						
+
 					}
 				}
-				//extracted_result = find(result.begin(), result.end(), L"SWIFT MT SENDER");
-				
-				if (result.empty() && extracted_result.empty()) {
-					result = extract_field_values(fields.at(L"SWIFT MT SENDER"), blocks,
-						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-						preprocess_bank_name,
+
+				if (result.empty() || to_wstring(result[0]).length() < 5) {
+					result = extract_field_values(fields.at(FIELD_NAME), blocks,
+						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 1.6, 100, true), // 우측 여러 라인일때
+						preprocess_sender,
 						default_extract,
 						postprocess_uppercase);
-					
+
 					if (result.empty()) {
-						result = extract_field_values(fields.at(L"SWIFT MT SENDER"), blocks,
+						result = extract_field_values(fields.at(FIELD_NAME), blocks,
 							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							preprocess_bank_name,
+							preprocess_sender,
 							default_extract,
 							postprocess_uppercase);
 					}
+
 				}
 
-
-				
 				if (result.empty()) {
 					return extracted_result;
 				}
@@ -12633,20 +12630,22 @@ namespace selvy {
 						extracted_result.emplace_back(to_wstring(a));
 					}
 
-					if (extracted_result.size() > 5) {
-						for (auto i = 0; i < extracted_result.size(); i++) {
-							auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
-							if (str.find(L"BEHEFICIARY") != std::wstring::npos ||
-								str.find(L"BENEFICIARY") != std::wstring::npos ||
-								str.find(L"BENEBWWT") != std::wstring::npos) {
-								extracted_result.resize(i);
-								break;
-							}
+					
+					for (auto i = 0; i < extracted_result.size(); i++) {
+						auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
+						if (str.find(L"BEHEFICIARY") != std::wstring::npos ||
+							str.find(L"BENEFICIARY") != std::wstring::npos ||
+							str.find(L"FIENEFICLART") != std::wstring::npos ||
+							str.find(L"BENEBWWT") != std::wstring::npos) {
+							extracted_result.resize(i);
+							break;
 						}
 					}
+					
 				}
-				
+
 				return extracted_result;
+
 			}
 
 			static std::vector<std::wstring>
@@ -12656,29 +12655,39 @@ namespace selvy {
 									const std::vector<block>& blocks,
 									const cv::Size& image_size)
 			{
+				const std::wstring FIELD_NAME = L"CREDIT NUMBER";
 
 				std::vector<std::wstring> extracted_result;
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
 
 
-				result = extract_field_values(fields.at(L"DOCUMENTARY CREDIT NUMBER"), blocks,
+				result = extract_field_values(fields.at(FIELD_NAME), blocks,
 					search_self,
-					preprocess_amount,
+					preprocess_credit_number,
 					default_extract,
 					postprocess_uppercase);
-				if (result.empty()) {
-					result = extract_field_values(fields.at(L"DOCUMENTARY CREDIT NUMBER"), blocks,
+				if (result.empty() || to_wstring(result[0]).length() < 5) {
+					result = extract_field_values(fields.at(FIELD_NAME), blocks,
 						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-						preprocess_amount,
+						preprocess_credit_number,
 						default_extract,
 						postprocess_uppercase);
 
 					if (result.empty()) {
-						result = extract_field_values(fields.at(L"DOCUMENTARY CREDIT NUMBER"), blocks,
+						result = extract_field_values(fields.at(FIELD_NAME), blocks,
 							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							preprocess_amount,
+							preprocess_credit_number,
 							default_extract,
 							postprocess_uppercase);
+					}
+
+					if (result.empty() || to_wstring(result[0]).length() < 5) {
+						result = extract_field_values(fields.at(FIELD_NAME), blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+							preprocess_credit_number,
+							default_extract,
+							default_postprocess);
+
 					}
 				}
 
@@ -12692,6 +12701,66 @@ namespace selvy {
 				}
 
 				return extracted_result;
+			}
+
+			static std::wstring
+				extract_amount(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				const std::wstring FIELD_NAME = L"AMOUNT";
+				if (fields.find(FIELD_NAME) == fields.end())
+					return L"";
+
+				std::vector<std::pair<cv::Rect, std::wstring>> total;
+
+				if (category == L"COMMERCIAL INVOICE") {
+					total = extract_field_values2(fields.at(FIELD_NAME), blocks,
+						search_self,
+						preprocess_amount,
+						default_extract,
+						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));
+
+					if (total.empty())
+						total = extract_field_values2(fields.at(FIELD_NAME), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 5.0, 8, false),
+							preprocess_amount,
+							default_extract,
+							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));
+				}
+				else if (category == L"LETTER OF CREDIT") {
+
+					total = extract_field_values(fields.at(FIELD_NAME), blocks,
+						search_self,
+						preprocess_amount,
+						default_extract,
+						default_postprocess);
+
+					if (total.empty() || to_wstring(total[0]).length() < 5) {
+						total = extract_field_values(fields.at(FIELD_NAME), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_amount,
+							default_extract,
+							default_postprocess);
+
+					}
+
+					if (total.empty() || to_wstring(total[0]).length() < 5) {
+						total = extract_field_values(fields.at(FIELD_NAME), blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+							preprocess_amount,
+							default_extract,
+							default_postprocess);
+
+					}
+
+				}
+
+
+				if (total.empty())
+					return L"";
+
+				return std::get<1>(total[0]);
 			}
 
 			static std::vector<std::wstring>
@@ -12994,99 +13063,8 @@ namespace selvy {
 				return std::get<1>(currency_sign[0]);
 			}
 
-			//find total line
-			static std::wstring
-				extract_amount(const configuration& configuration, const std::wstring& category,
-					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-					const std::vector<block>& blocks, const cv::Size& image_size)
-			{
-				if (fields.find(L"AMOUNT") == fields.end())
-					return L"";
-
-				std::vector<std::pair<cv::Rect, std::wstring>> total;
-
-				if (category == L"COMMERCIAL INVOICE") {
-					total = extract_field_values2(fields.at(L"AMOUNT"), blocks,
-						search_self,
-						preprocess_amount,
-						default_extract,
-						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));
-
-					if (total.empty())
-						total = extract_field_values2(fields.at(L"AMOUNT"), blocks,
-							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 5.0, 8, false),
-							preprocess_amount,
-							default_extract,
-							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));
-				} else if (category == L"LETTER OF CREDIT") {
-					total = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
-						search_self,
-						preprocess_amount,
-						default_extract,
-						default_postprocess);
-
-					if (total.empty()) {
-						total = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
-							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							preprocess_amount,
-							default_extract,
-							default_postprocess);
-					}
-
-				}
-
-
-				if (total.empty())
-					return L"";
-
-				return std::get<1>(total[0]);
-			}
-			/*
-			static std::vector<std::wstring>
-				extract_amount(const configuration& configuration, const std::wstring& category,
-					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-					const std::vector<block>& blocks, const cv::Size& image_size)
-			{
-				std::vector<std::wstring> extracted_result;
-				std::vector<std::pair<cv::Rect, std::wstring>> result;
-				auto isAmount = false;
-
-				if (category == L"LETTER OF CREDIT") {
-					result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
-						search_self,
-						preprocess_amount,
-						default_extract,
-						default_postprocess);
-
-					if (result.empty()) {
-						result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
-							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							preprocess_amount,
-							default_extract,
-							default_postprocess);
-					}
-					
-				} else if (category == L"COMMERCIAL INVOICE") {
-					result = extract_field_values(fields.at(L"CURRENCY CODE AMOUNT"), blocks,
-						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-						preprocess_amount,
-						default_extract,
-						default_postprocess);
-				}
-				
-
-				if (result.empty())
-					return std::vector<std::wstring>();
-
-				//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[0]));
-				//}
-
-				return extracted_result;
-
-				//return extract_company_and_address(configuration, category, L"L/C NO", fields, blocks);
-			}
-			*/
+			
+			
 
 			static bool
 				find_address_country(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category, const int line_index)
@@ -15245,12 +15223,34 @@ namespace selvy {
 
 				return std::make_pair(std::get<0>(a), text);
 			}
+
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_credit_number(const std::pair<cv::Rect, std::wstring>& a)
+			{
+				auto text = std::get<1>(a);
+				//text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
+				//text = boost::regex_replace(text, boost::wregex(L":"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(DATED)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"[«:]{1}"), L""); 
+				return std::make_pair(std::get<0>(a), text);
+			}
+
 			static std::pair<cv::Rect, std::wstring>
 				preprocess_amount(const std::pair<cv::Rect, std::wstring>& a)
 			{
 				auto text = std::get<1>(a);
-				//text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
-
+				
+				text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
+				text = boost::regex_replace(text, boost::wregex(L":"), L"");
+				text = boost::regex_replace(text, boost::wregex(L";"), L"");
+				//text = boost::regex_replace(text, boost::wregex(L"[:;-)]"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(Tolerance)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(TOLERA[NH]{1}CE)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(QUANTrTY)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"0SD"), L"USD"); 
+				text = boost::regex_replace(text, boost::wregex(L"UoD"), L"USD");
+				text = boost::regex_replace(text, boost::wregex(L"새0때T"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"amount"), L"");
 				return std::make_pair(std::get<0>(a), text);
 			}
 

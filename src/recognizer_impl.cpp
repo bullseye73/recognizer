@@ -15341,10 +15341,11 @@ namespace selvy {
 
 				if (!text.empty()) {
 					text = boost::regex_replace(text, boost::wregex(L" "), L"");
+					text = boost::regex_replace(text, boost::wregex(L"[()|]"), L"");
 					text = boost::regex_replace(text, boost::wregex(L"SEOUL[.,]{1}KOREA"), L"");
-					text = boost::regex_replace(text, boost::wregex(L"DATE"), L"");
+					text = boost::regex_replace(text, boost::wregex(L"[dDaAtTeE]{4}"), L"");
 					text = boost::regex_replace(text, boost::wregex(L"DON"), L"");
-					text = boost::regex_replace(text, boost::wregex(L"THREE(3)|"), L"");
+					text = boost::regex_replace(text, boost::wregex(L"[tThHrReEeE]{5}[0-9]{1}"), L"");
 					text = boost::regex_replace(text, boost::wregex(L"[/]{1}"), L" ");
 					if (func_is_date(text)) {
 						return std::make_pair(std::get<0>(a), text);

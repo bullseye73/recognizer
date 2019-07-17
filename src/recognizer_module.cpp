@@ -84,6 +84,7 @@ main()
 		L"COMMERCIAL INVOICE",       //14
 		L"LETTER OF GUARANTEE",      //15
 		L"FIRM OFFER",               //16
+		L"PROFORMA INVOICE",               //17
 	};
 
 //    std::unordered_map<std::wstring, std::vector<std::wstring>> key_values = {
@@ -111,6 +112,7 @@ main()
 		{ categories[14],{ L"SELLER", L"AMOUNT", L"L/C" } },
 		{ categories[15],{ L"CARRIER", L"SHOPPER", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"CONSIGNEE", L"GOODS DESCRIPTION", L"NOTIFY" } },
 		{ categories[16],{ L"SELLER", L"BUYER", L"ORIGIN", L"APPLICANT", L"COLLECTING BANK" } },
+		{ categories[17],{ L"BANK NAME", L"SWIFT CODE"} },
 	};
 
 
@@ -132,6 +134,7 @@ main()
 		auto category = L"BILL OF LADING";// categories[14];
 		//auto category = L"LETTER OF CREDIT"; //
 		//auto category = L"COMMERCIAL INVOICE";
+		//auto category = L"PROFORMA INVOICE"; //
 		const auto fields = recognizer->recognize(file, category);
 
 		auto output_path = fmt::format(L"{}_result.txt", boost::filesystem::path(file).native());

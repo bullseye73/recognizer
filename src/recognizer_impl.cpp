@@ -13280,10 +13280,21 @@ namespace selvy {
 				else {
 					for (auto& a : consignee) {
 						auto value = to_wstring(a);
+						value = boost::regex_replace(value, boost::wregex(L"/ Y"), L"");
 						value = boost::regex_replace(value, boost::wregex(L"([tT]{1}EL)(.*)"), L"");
-						value = boost::regex_replace(value, boost::wregex(L"([tT]{1}ax)(.*)"), L"");
+						value = boost::regex_replace(value, boost::wregex(L"([tT]{1}[aA]{1}[xX]{1})(.*)"), L"");
 						value = boost::regex_replace(value, boost::wregex(L"([fF]{1}ax)(.*)"), L"");
 						value = boost::regex_replace(value, boost::wregex(L"(ATTN)(.*)"), L"");
+						value = boost::regex_replace(value, boost::wregex(L"(NOTIFY PARTY)(.*)"), L"");
+						value = boost::regex_replace(value, boost::wregex(L"AHN"), L"ATTN");
+						value = boost::regex_replace(value, boost::wregex(L"HOFC"), L"HDFC");
+						value = boost::regex_replace(value, boost::wregex(L"KEKO"), L"NEKO");
+						value = boost::regex_replace(value, boost::wregex(L"BALK"), L"HALK");
+						value = boost::regex_replace(value, boost::wregex(L"PUBAU"), L"PUBALI");
+						value = boost::regex_replace(value, boost::wregex(L"MOHAKHAU QK"), L"MOHAKHALI C/A");
+						value = boost::regex_replace(value, boost::wregex(L"LID. MO"), L"LTD 1-10");
+						value = boost::regex_replace(value, boost::wregex(L"COMPANY UNITED"), L"COMPANY LIMITED");
+						value = boost::regex_replace(value, boost::wregex(L" I LAS C DRV7C ROZAS, MADRID, RDTN CHTKI"), L"LAS ROZAS MADRID");
 						extracted_consignee.emplace_back(value);
 					}
 				}

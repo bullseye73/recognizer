@@ -3228,13 +3228,32 @@ namespace selvy {
 		}
 		
 		inline std::pair<cv::Rect, std::wstring>
-		//	preprocess_port_of_discharge(const std::pair<cv::Rect, std::wstring>& a)
-			preprocess_port_of_discharge(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category)
+			preprocess_port_of_discharge(const std::pair<cv::Rect, std::wstring>& a)
+			//preprocess_port_of_discharge(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category)
 		{
-			auto text = std::get<1>(a);
-			//text = boost::replace_all_copy(text, L"(or the place)(.*)", L"");
-			text = boost::regex_replace(text, boost::wregex(L"(or the place)(.*)"), L"");
-			text = boost::regex_replace(text, boost::wregex(L"(to the)(.*)"), L"");
+			auto text = boost::to_upper_copy(std::get<1>(a));
+			text = boost::regex_replace(text, boost::wregex(L"[><,]"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(HQCHIMINH|HOCH IM INH)"), L"HOCHIMINH");
+			text = boost::regex_replace(text, boost::wregex(L"VI FT NAM"), L"VIETNAM");
+			text = boost::regex_replace(text, boost::wregex(L"(AU UAE)"), L"ALI UAE");
+			text = boost::regex_replace(text, boost::wregex(L"ADELA1 DE"), L"ADELAIDE");
+			text = boost::regex_replace(text, boost::wregex(L"AUSTRAL 1A"), L"AUSTRALIA");
+			text = boost::regex_replace(text, boost::wregex(L"PORI"), L"PORT");
+			text = boost::regex_replace(text, boost::wregex(L"CHAUOGRAM"), L"CHATTOGRAM ");
+			text = boost::regex_replace(text, boost::wregex(L"EGY1"), L"EGYPT");
+
+			text = boost::regex_replace(text, boost::wregex(L"(OR THE)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(AT THE)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(TO THE)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(THIS)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(NUMBER)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(DELIVERED)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(HEREIN)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(FORWARDING)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(MARKS)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(SHOWN)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(ACCEPTING)(.*)"), L"");
+
 			text = boost::replace_all_copy(text, L"»*", L"**");
 			text = boost::replace_all_copy(text, L"*»", L"**");			
 			
@@ -3244,7 +3263,6 @@ namespace selvy {
 			std::wstring strBuf = L"";
 			auto nCnt = 0;
 			if (words.size() > 1) {
-				
 				for (auto i = 1; i < words.size(); i++) {
 					if (words[0] == words[i]) 
 						break;
@@ -3257,6 +3275,9 @@ namespace selvy {
 						strBuf += L" ";
 					strBuf += words[i];
 				}
+			}
+			else if (words.size() == 1) {
+				strBuf = words[0];
 			}
 
 			return std::make_pair(std::get<0>(a), strBuf);
@@ -12844,35 +12865,27 @@ namespace selvy {
 				
 				
 				result = extract_field_values(fields.at(FIELD_NAME), blocks,
-					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 1.6, 10, false, false, false), // 0.1, 1.6, 100, true)
-					std::bind(&preprocess_port_of_discharge,
-						std::placeholders::_1,
-						configuration, L"countries"),
+					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false), // 0.1, 1.6, 100, true)
+					preprocess_port_of_discharge,
 					default_extract,
 					postprocess_uppercase);
 
-				if (result.empty() || to_wstring(result[0]).length() > 50) {
-					return extracted_result;
-				}
-				else {
-					//for (auto& a : result) {
-						extracted_result.emplace_back(to_wstring(result[0]));
-					//}
-				}
 
 				if (result.empty()) {
 					result = extract_field_values(fields.at(FIELD_NAME), blocks,
-						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-						std::bind(&preprocess_port_of_discharge,
-							std::placeholders::_1,
-							configuration, L"countries"),
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 1.6, 100, false),
+						preprocess_port_of_discharge,
 						default_extract,
 						postprocess_uppercase);
 				}
 
 
-				if (result.empty() || to_wstring(result[0]).length() > 50) {
-					return extracted_result;
+				if (result.empty()) {
+					extracted_result.emplace_back(L"");
+
+				}
+				else {
+					extracted_result.emplace_back(to_wstring(result[0]));
 				}
 
 				return extracted_result;

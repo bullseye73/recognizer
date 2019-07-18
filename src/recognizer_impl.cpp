@@ -3297,6 +3297,38 @@ namespace selvy {
 		}
 
 		inline std::pair<cv::Rect, std::wstring>
+			preprocess_notify(const std::pair<cv::Rect, std::wstring>& a)
+		{
+			auto text = boost::to_upper_copy(std::get<1>(a));
+			
+			text = boost::regex_replace(text, boost::wregex(L"N1AZI"), L"NIAZI");
+			text = boost::regex_replace(text, boost::wregex(L"KDIL"), L"KOIL");
+			text = boost::regex_replace(text, boost::wregex(L"2-UKM"), L"2-CHOME");
+			text = boost::regex_replace(text, boost::wregex(L"UH FLOOR"), L"7TH FLOOR");
+			text = boost::regex_replace(text, boost::wregex(L"2Q49"), L"2019");
+			text = boost::regex_replace(text, boost::wregex(L"BXBARIJALTOU"), L"B K BARI TALTOLI");
+			text = boost::regex_replace(text, boost::wregex(L"MCQ"), L"MCCI");
+			text = boost::regex_replace(text, boost::wregex(L"PUBAU"), L"PUBALI");
+			text = boost::regex_replace(text, boost::wregex(L"K0SAKAHI"), L"KOSAKAHI");
+			text = boost::regex_replace(text, boost::wregex(L"HIHANO"), L"HIRANO");
+			text = boost::regex_replace(text, boost::wregex(L"KLARACONDONG"), L"KIARACONDONG");
+			text = boost::regex_replace(text, boost::wregex(L"[(]{1}DLUEN"), L"(1)LUEN");
+			text = boost::regex_replace(text, boost::wregex(L"ABDELMOVMEN, QUARTIER DES HQPITAUX"), L"ABDELMOUMEN, QUARTIER DES HOPITAUX");
+			text = boost::regex_replace(text, boost::wregex(L"PUBUC COMPANY UNITED"), L"PUBLIC COMPANY LIMITED");
+			text = boost::regex_replace(text, boost::wregex(L"PHASE ([1I]{1}[8B]{1})"), L"PHASE 1B");
+			text = boost::regex_replace(text, boost::wregex(L"(BOULEVAR[DO]{1}E) P 0 BOX"), L"BOULEVARDE P O BOX");			
+			text = boost::regex_replace(text, boost::wregex(L"(FOR)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(TEL)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(TAX ID)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(ATTN)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(PHONE)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(/ PRE)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(OFFICIAL)(.*)"), L"");
+
+			return std::make_pair(std::get<0>(a), text);
+		}
+
+		inline std::pair<cv::Rect, std::wstring>
 			preprocess_port_of_loading(const std::pair<cv::Rect, std::wstring>& a)
 		{
 			auto text = std::get<1>(a);
@@ -13366,7 +13398,6 @@ namespace selvy {
 				std::vector<std::wstring> extracted_result;
 
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
-#if 1
 
 				const auto paper = image_size;
 				std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> left_side_field;
@@ -13384,8 +13415,7 @@ namespace selvy {
 				if (left_side_field.find(FIELD_NAME) != left_side_field.end()) {
 					result = extract_field_values(left_side_field.at(FIELD_NAME), blocks,
 						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
-						default_preprocess,
-						//create_extract_function(L"(?:ORDER OF )(.*)"),
+						preprocess_notify,
 						default_extract,
 						postprocess_uppercase);
 				}
@@ -13396,53 +13426,20 @@ namespace selvy {
 					extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, fields, blocks);
 				}
 				else {
-					for (auto& a : result) {
-						auto value = to_wstring(a);
-						value = boost::regex_replace(value, boost::wregex(L"(FOR)(.*)"), L"");
-						value = boost::regex_replace(value, boost::wregex(L"(TEL)(.*)"), L"");
-						extracted_result.emplace_back(value);
-					}
-				}
-
-				return extracted_result;
-#else
-				const auto paper = image_size;
-				std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> left_side_field;
-				for (auto& field : fields.at(L"NOTIFY")) {
-					auto rect = to_rect(field);
-
-					if (rect.x < paper.width / 4 && rect.y < paper.height / 2) {
-						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
-						new_field.emplace_back(field);
-						left_side_field.insert(std::make_pair(FIELD_NAME, new_field));
-						break;
-					}
-				}
-				
-
-				if (result.empty()) {
-					extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, left_side_field, blocks);
-					if (!extracted_result.empty() && extracted_result.size() > 5) {
-						for (auto i = 0; i < extracted_result.size(); i++) {
-							auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
-							if (str.find(FIELD_NAME) != std::wstring::npos) {
-								extracted_result.resize(i);
-								break;
-							}
-						}
-					}
-					else {
-						extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, fields, blocks);
-					}
-				}
-				else {
+					//for (auto& a : result) {
+					//	auto value = to_wstring(a);
+					//	value = boost::regex_replace(value, boost::wregex(L"(FOR)(.*)"), L"");
+					//	value = boost::regex_replace(value, boost::wregex(L"(TEL)(.*)"), L"");
+					//	extracted_result.emplace_back(value);
+					//}
 					for (auto& a : result) {
 						extracted_result.emplace_back(to_wstring(a));
 					}
+
 				}
 
 				return extracted_result;
-#endif
+
 			}
 
 			static std::vector<std::wstring>

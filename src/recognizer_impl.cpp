@@ -13615,18 +13615,6 @@ namespace selvy {
 					postprocess_uppercase);
 
 				if (result.empty()) {
-					return extracted_result;
-				}
-				else {
-					//for (auto& a : result) {
-					auto value = to_wstring(result[0]);
-					//value = boost::regex_replace(value, boost::wregex(L"190 I"), L"1901");
-					//value = boost::regex_replace(value, boost::wregex(L"[0-9]{3,5}[A-Z] "), L"");
-					extracted_result.emplace_back(value);
-					//}
-				}
-
-				if (result.empty()) {
 					result = extract_field_values(fields.at(FIELD_NAME), blocks,
 						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 						preprocess_vessel_name,
@@ -13635,56 +13623,17 @@ namespace selvy {
 				}
 
 
-				if (result.empty() || to_wstring(result[0]).length() > 50) {
-					return extracted_result;
+				if (result.empty()) {
+					extracted_result.emplace_back(L"");
+				}
+				else {
+					//for (auto& a : result) {
+					extracted_result.emplace_back(to_wstring(result[0]));
+					//}
 				}
 
 				return extracted_result;
-				/*
-				if (fields.find(L"VESSEL NAME") == fields.end())
-					return L"";
-
-				std::vector<std::pair<cv::Rect, std::wstring>> vessel_name;
-
-				if (category == L"BILL OF LADING") {
-					vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2.5, false, false, false),
-						preprocess_vessel_name,
-						default_extract,
-						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
-
-				}
-				else {
-					vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2, false, false, false),
-						preprocess_vessel_name,
-						default_extract,
-						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
-
-					if (vessel_name.empty() && category == L"INSURANCE POLICY") {
-						vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
-							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 8, false),
-							preprocess_vessel_name,
-							default_extract,
-							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
-						if (vessel_name.empty()) {
-							vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
-								search_self,
-								preprocess_vessel_name,
-								default_extract,
-								std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
-						}
-					}
-				}
-
-				boost::remove_erase_if(vessel_name, [](const std::pair<cv::Rect, std::wstring>& vessel) {
-					return boost::regex_search(std::get<1>(vessel), boost::wregex(L"TO BE (?:DECLARED|ADVISED)", boost::regex_constants::icase)); });
-
-				if (vessel_name.empty())
-					return L"";
-
-				return std::get<1>(vessel_name[0]);
-				*/
+				
 			}
 
 			static std::wstring
@@ -15256,12 +15205,31 @@ namespace selvy {
 			static std::pair<cv::Rect, std::wstring>
 				preprocess_vessel_name(const std::pair<cv::Rect, std::wstring>& a)
 			{
-				auto text = std::get<1>(a);
+				auto text = boost::to_upper_copy(std::get<1>(a));
+
 				text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
 				text = boost::regex_replace(text, boost::wregex(L"L1NE"), L"LINE");
-				text = boost::regex_replace(text, boost::wregex(L"/?FLIGHT to:?", boost::regex::icase), L"");
-				text = boost::regex_replace(text, boost::wregex(L"[oO]{1}ther(.*)"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"[vV]{1}.[0-9]{3,5}(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(HEUN6)"), L"HEUNG");
+				text = boost::regex_replace(text, boost::wregex(L"(NAGDYA)"), L"NAGOYA");
+				text = boost::regex_replace(text, boost::wregex(L"(CL54W|DI'4W)"), L"054W");
+				text = boost::regex_replace(text, boost::wregex(L"(RYPPPTTS)"), L"EXPRESS");
+				text = boost::regex_replace(text, boost::wregex(L"(CHAI I FNGF)"), L"CHALLENGE");
+				text = boost::regex_replace(text, boost::wregex(L"(1906S|1907E|1913E|0150S)(.*)"), L"$1");
+				text = boost::regex_replace(text, boost::wregex(L"(HEE 309)(.*)"), L"HEE 309");
+				
+				//text = boost::regex_replace(text, boost::wregex(L"/?FLIGHT to:?", boost::regex::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(OTHER)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(CARRIER)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(IO THE)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(TO ME PORT)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(THE PORT)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(OF LOADING)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(OTHER)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(BDH)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(PALEMBANG)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(917|022)W(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"V[ .#-]{1}[0-9]{3,5}(.*)"), L"");
+				
 
 				return std::make_pair(std::get<0>(a), text);
 			}

@@ -3242,6 +3242,7 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"CHAUOGRAM"), L"CHATTOGRAM ");
 			text = boost::regex_replace(text, boost::wregex(L"EGY1"), L"EGYPT");
 
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(SFAX ) "), L"SFAX ");
 			text = boost::regex_replace(text, boost::wregex(L"(OR THE)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(AT THE)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(TO THE)(.*)"), L"");
@@ -3352,16 +3353,65 @@ namespace selvy {
 		inline std::pair<cv::Rect, std::wstring>
 			preprocess_port_of_loading(const std::pair<cv::Rect, std::wstring>& a)
 		{
-			auto text = std::get<1>(a);
-			text = boost::replace_all_copy(text, L"♦*", L"");
+			auto text = boost::to_upper_copy(std::get<1>(a));
+			text = boost::regex_replace(text, boost::wregex(L"[><,♦*—]"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"190 I"), L"1901");
-			text = boost::regex_replace(text, boost::wregex(L"[0-9]{3,5}[A-Z] "), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)([0-9]{3,5}[A-Z]) "), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(I FNGF)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(GREEN)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(TUNE)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(ULSAN)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(HEE 309)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(MINH 6)"), L"");
 			
-			//text = boost::regex_replace(text, boost::wregex(L"»*"), L"**");
-			//text = boost::regex_replace(text, boost::wregex(L"*»"), L"**");
-			//text = boost::regex_replace(text, boost::wregex(L"/?FLIGHT to:?", boost::regex::icase), L"");
 
-			return std::make_pair(std::get<0>(a), text);
+			text = boost::regex_replace(text, boost::wregex(L"(HQCHIMINH|HOCH IM INH)"), L"HOCHIMINH");
+			text = boost::regex_replace(text, boost::wregex(L"(KAORICRIUNTRY)"), L"KAOHSIUNG");
+			text = boost::regex_replace(text, boost::wregex(L"T AD. WAN"), L"TAIWAN");
+			text = boost::regex_replace(text, boost::wregex(L"VI FT NAM"), L"VIETNAM");
+			text = boost::regex_replace(text, boost::wregex(L"(AU UAE)"), L"ALI UAE");
+			text = boost::regex_replace(text, boost::wregex(L"ADELA1 DE"), L"ADELAIDE");
+			text = boost::regex_replace(text, boost::wregex(L"AUSTRAL 1A"), L"AUSTRALIA");
+			text = boost::regex_replace(text, boost::wregex(L"PORI"), L"PORT");
+			text = boost::regex_replace(text, boost::wregex(L"CHAUOGRAM"), L"CHATTOGRAM ");
+			text = boost::regex_replace(text, boost::wregex(L"EGY1"), L"EGYPT");
+
+			text = boost::regex_replace(text, boost::wregex(L"([OIAT]{1}[ROT]{1} THE)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(SFAX )(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(THIS)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(NUMBER)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(DELIVERED)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(HEREIN)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(FORWARDING)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(MARKS)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(SHOWN)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(ACCEPTING)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(MORE OR)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(APPLICABLE)(.*)"), L"");
+
+			std::vector<std::wstring> words;
+			boost::algorithm::split(words, text, boost::is_any_of(L"., "), boost::token_compress_on);
+			std::wstring strBuf = L"";
+			auto nCnt = 0;
+			if (words.size() > 1) {
+				for (auto i = 1; i < words.size(); i++) {
+					if (words[0] == words[i])
+						break;
+					else
+						nCnt++;
+				}
+
+				for (auto i = 0; i <= nCnt; i++) {
+					if (i != 0)
+						strBuf += L" ";
+					strBuf += words[i];
+				}
+			}
+			else if (words.size() == 1) {
+				strBuf = words[0];
+			}
+
+			return std::make_pair(std::get<0>(a), strBuf);
 		}
 
 		inline std::wstring
@@ -12561,7 +12611,7 @@ namespace selvy {
 
 				if (result.empty()) {
 					result = extract_field_values(fields.at(FIELD_NAME), blocks,
-						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, true),
 						preprocess_sender,
 						default_extract,
 						postprocess_uppercase);

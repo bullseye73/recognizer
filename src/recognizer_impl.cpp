@@ -3242,7 +3242,7 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"CHAUOGRAM"), L"CHATTOGRAM ");
 			text = boost::regex_replace(text, boost::wregex(L"EGY1"), L"EGYPT");
 
-			text = boost::regex_replace(text, boost::wregex(L"(.*)(SFAX ) "), L"SFAX ");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(SFAX) "), L"SFAX ");
 			text = boost::regex_replace(text, boost::wregex(L"(OR THE)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(AT THE)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(TO THE)(.*)"), L"");
@@ -12661,11 +12661,12 @@ namespace selvy {
 
 				if (result.empty()) {
 					result = extract_field_values(fields.at(L"ON BOARD DATE"), blocks,
-						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 1.6, 100, true),
+						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 						preprocess_shipment_date,
 						default_extract,
 						postprocess_uppercase);
 				}
+
 
 				if (result.empty()) {
 					extracted_result.emplace_back(L"");
@@ -15408,21 +15409,26 @@ namespace selvy {
 			static std::pair<cv::Rect, std::wstring>
 				preprocess_shipment_date(const std::pair<cv::Rect, std::wstring>& a)
 			{
-				auto text = std::get<1>(a);
+				auto text = boost::to_upper_copy(std::get<1>(a));
+
 
 				if (!text.empty()) {
 					text = boost::regex_replace(text, boost::wregex(L" "), L"");
 					text = boost::regex_replace(text, boost::wregex(L"[()|]"), L"");
 					text = boost::regex_replace(text, boost::wregex(L"SEOUL[.,]{1}KOREA"), L"");
-					text = boost::regex_replace(text, boost::wregex(L"[dDaAtTeE]{4}"), L"");
+					text = boost::regex_replace(text, boost::wregex(L"[DATE]{4}"), L"");
 					text = boost::regex_replace(text, boost::wregex(L"DON"), L"");
-					text = boost::regex_replace(text, boost::wregex(L"[tThHrReEeE]{5}[0-9]{1}"), L"");
+					text = boost::regex_replace(text, boost::wregex(L"(~T7)"), L"");
+					text = boost::regex_replace(text, boost::wregex(L"[THREE]{5}[0-9]{1}"), L"");
 					text = boost::regex_replace(text, boost::wregex(L"[/]{1}"), L" ");
+					text = boost::regex_replace(text, boost::wregex(L"(ATNOYMLUM)(.*)"), L"");
+
 					if (func_is_date(text)) {
 						return std::make_pair(std::get<0>(a), text);
 					}
-
 				}
+
+				
 
 				return std::make_pair(std::get<0>(a), L"");
 				
@@ -15435,15 +15441,28 @@ namespace selvy {
 				std::regex pt01("[0-9]{4}[ .,/-]{1}[0-9]{2}[ .,/-]{1}[0-9]{2}");
 				std::regex pt02("[a-zA-Z]{3}[ .,/-]{1}[0-9]{2}[ .,/-]{1}[0-9]{4}");
 				std::regex pt03("[0-9]{2}[ .,/-]{1}[a-zA-Z]{3}[ .,/-]{1}[0-9]{2,4}");
+				std::regex pt04("[a-zA-Z]{3}[0-9]{2}[ .,/-]{1}[0-9]{4}");
+				std::regex pt05("[a-zA-Z]{3}[0-9]{6}");
+				std::regex pt06("[0-9]{2}[a-zA-Z]{3}[0-9]{4}");
+				std::regex pt07("[0-9]{2}[ .,/-]{1}[0-9]{2}[ .,/-]{1}[0-9]{4}");
+
 				
-				if (std::regex_search(strDate.begin(), strDate.end(), pt01))
-					return true;
-				else if (std::regex_search(strDate.begin(), strDate.end(), pt02))
-					return true;
-				else if (std::regex_search(strDate.begin(), strDate.end(), pt03))
-					return true;
-				else
+				if (std::regex_search(strDate.begin(), strDate.end(), pt01) ||
+					std::regex_search(strDate.begin(), strDate.end(), pt02) ||
+					std::regex_search(strDate.begin(), strDate.end(), pt03) ||
+					std::regex_search(strDate.begin(), strDate.end(), pt04) ||
+					std::regex_search(strDate.begin(), strDate.end(), pt05) ||
+					std::regex_search(strDate.begin(), strDate.end(), pt06) ||
+					std::regex_search(strDate.begin(), strDate.end(), pt07) ){
+
+					if (strDate.size() <= 12)
+						return true;
+					else
+						return false;
+				}
+				else {
 					return false;
+				}
 			}
 
 			//preprocess_lc_number

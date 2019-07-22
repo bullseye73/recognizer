@@ -3334,6 +3334,7 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"K0SAKAHI"), L"KOSAKAHI");
 			text = boost::regex_replace(text, boost::wregex(L"HIHANO"), L"HIRANO");
 			text = boost::regex_replace(text, boost::wregex(L"KLARACONDONG"), L"KIARACONDONG");
+			text = boost::regex_replace(text, boost::wregex(L"GONOANGOIA"), L"GODANGDIA");
 			text = boost::regex_replace(text, boost::wregex(L"[(]{1}DLUEN"), L"(1)LUEN");
 			text = boost::regex_replace(text, boost::wregex(L"ABDELMOVMEN, QUARTIER DES HQPITAUX"), L"ABDELMOUMEN, QUARTIER DES HOPITAUX");
 			text = boost::regex_replace(text, boost::wregex(L"PUBUC COMPANY UNITED"), L"PUBLIC COMPANY LIMITED");
@@ -3375,6 +3376,7 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"PORI"), L"PORT");
 			text = boost::regex_replace(text, boost::wregex(L"CHAUOGRAM"), L"CHATTOGRAM ");
 			text = boost::regex_replace(text, boost::wregex(L"EGY1"), L"EGYPT");
+			text = boost::regex_replace(text, boost::wregex(L"KOREZ"), L"KOREA");
 
 			text = boost::regex_replace(text, boost::wregex(L"([OIAT]{1}[ROT]{1} THE)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(SFAX )(.*)"), L"");
@@ -14871,8 +14873,13 @@ namespace selvy {
 
 					carrier_name = to_wstring(*carrier);
 				}
+				std::wstring strBuf = boost::regex_replace(carrier_name, boost::wregex(L"ETE.- TL"), L"ETERNITY INTL");
+				strBuf = boost::regex_replace(strBuf, boost::wregex(L"HAFLINES"), L"HAI LINES");
+				strBuf = boost::regex_replace(strBuf, boost::wregex(L"LLOVP"), L"LLOVD");
+				//strBuf = boost::regex_replace(strBuf, boost::wregex(L"EJJ IYCO"), L"EXPRESS INTL CO");
+				strBuf = boost::regex_replace(strBuf, boost::wregex(L"(?:.* (?:(?:FOR|OF) THE (?:CARRIER|GAMER)|BEHALF OF) |\\s*(?:BY|ONBOARD|FOR|ISSUED|SIGNED)\\s|\\s*AS CARRIER[.,]?)"), L"");
 
-				return boost::trim_copy(boost::regex_replace(carrier_name, boost::wregex(L"(?:.* (?:(?:FOR|OF) THE (?:CARRIER|GAMER)|BEHALF OF) |\\s*(?:BY|ONBOARD|FOR|ISSUED|SIGNED)\\s|\\s*AS CARRIER[.,]?)", boost::regex::icase), L""));
+				return boost::trim_copy(strBuf);
 			}
 
 			static std::wstring
@@ -15209,6 +15216,7 @@ namespace selvy {
 
 				text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
 				text = boost::regex_replace(text, boost::wregex(L"L1NE"), L"LINE");
+				text = boost::regex_replace(text, boost::wregex(L"VI11"), L"VIII");
 				text = boost::regex_replace(text, boost::wregex(L"(HEUN6)"), L"HEUNG");
 				text = boost::regex_replace(text, boost::wregex(L"(NAGDYA)"), L"NAGOYA");
 				text = boost::regex_replace(text, boost::wregex(L"(CL54W|DI'4W)"), L"054W");

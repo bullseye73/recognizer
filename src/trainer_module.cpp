@@ -509,7 +509,7 @@ main()
 	const auto secret = "";
 	selvy::ocr::train_classification_model(engine, configuration, L"C:\\workspace\\vs2015\\OUTPUT\\classification", secret);
 	//selvy::ocr::classify_documents(engine, configuration, L"C:\\workspace\\vs2015\\images", L"C:\\workspace\\vs2015\\OUTPUT\\classification", secret);
-	selvy::ocr::classify_documents(engine, configuration, L"D:\\Downloads\\IBK 관련\\000001 ~ 002500", L"C:\\workspace\\vs2015\\OUTPUT\\classification", secret);
+	selvy::ocr::classify_documents(engine, configuration, L"D:\\Downloads\\IBK 관련\\images", L"C:\\workspace\\vs2015\\OUTPUT\\classification", secret);
     spdlog::drop_all();
 
     return 0;

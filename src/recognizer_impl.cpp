@@ -3297,11 +3297,24 @@ namespace selvy {
 		inline std::pair<cv::Rect, std::wstring>
 			preprocess_sender(const std::pair<cv::Rect, std::wstring>& a)
 		{
-			auto text = std::get<1>(a);
-			text = boost::regex_replace(text, boost::wregex(L"SWIFT MT SENDER"), L"");
+			auto text = boost::to_upper_copy(std::get<1>(a));
 			text = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z0-9\\., ]"), L"");
-			//text = boost::replace_all_copy(text, L":", L"");
-			//text = boost::replace_all_copy(text, L"RES애A BANK", L"RESONA BANK");
+			text = boost::regex_replace(text, boost::wregex(L"A[0-9]{13}"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(   I)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(RESA BANK)"), L"RESONA BANK");
+			text = boost::regex_replace(text, boost::wregex(L"(MUFG RANK)"), L"MUFG BANK");
+			text = boost::regex_replace(text, boost::wregex(L"(KOTOKO)"), L"KOTOKU");
+			text = boost::regex_replace(text, boost::wregex(L"(R BRANFK)"), L"BRANCH");
+
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(SWIFT MT )(.*)"), L"");
+			//text = boost::regex_replace(text, boost::wregex(L"(BE[HN]{1}EFICIARY|FIENEFICLART|BENEBWWT)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(TEXTILE)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(SAMU)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(DAEJUNG)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(WHANAM)(.*)"), L"");
+
+			if (text.length() <= 2)
+				return std::make_pair(std::get<0>(a), L"");
 
 			return std::make_pair(std::get<0>(a), text);
 		}
@@ -12699,52 +12712,31 @@ namespace selvy {
 					preprocess_sender,
 					default_extract,
 					postprocess_uppercase);
-
-				if (!result.empty()) {
-					for (auto& a : result) {
-						auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(to_wstring(a)));
-
-						if (str.find(FIELD_NAME) != std::wstring::npos) {
-							str = boost::replace_all_copy(str, FIELD_NAME, L"");
-							if (str.size() <= 0) {
-								result.clear();
-							}
-							else {
-								result.clear();
-								extracted_result.emplace_back(str);
-							}
-							break;
-						}
-
-					}
-				}
-
-				if (result.empty() || to_wstring(result[0]).length() < 5) {
+				
+				if (result.empty()) {
 					result = extract_field_values(fields.at(FIELD_NAME), blocks,
 						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 1.6, 100, true), // 우측 여러 라인일때
 						preprocess_sender,
 						default_extract,
 						postprocess_uppercase);
-
-					if (result.empty()) {
-						result = extract_field_values(fields.at(FIELD_NAME), blocks,
-							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							preprocess_sender,
-							default_extract,
-							postprocess_uppercase);
-					}
-
 				}
 
 				if (result.empty()) {
-					return extracted_result;
+					result = extract_field_values(fields.at(FIELD_NAME), blocks,
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						preprocess_sender,
+						default_extract,
+						postprocess_uppercase);
+				}
+
+
+				if (result.empty()) {
+					extracted_result.emplace_back(L"");
 				}
 				else {
 					for (auto& a : result) {
 						extracted_result.emplace_back(to_wstring(a));
 					}
-
-					
 					for (auto i = 0; i < extracted_result.size(); i++) {
 						auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
 						if (str.find(L"BEHEFICIARY") != std::wstring::npos ||
@@ -12755,7 +12747,6 @@ namespace selvy {
 							break;
 						}
 					}
-					
 				}
 
 				return extracted_result;

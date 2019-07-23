@@ -3305,6 +3305,8 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"(MUFG RANK)"), L"MUFG BANK");
 			text = boost::regex_replace(text, boost::wregex(L"(KOTOKO)"), L"KOTOKU");
 			text = boost::regex_replace(text, boost::wregex(L"(R BRANFK)"), L"BRANCH");
+			text = boost::regex_replace(text, boost::wregex(L"(KFLITARY)"), L"MILITARY");
+			text = boost::regex_replace(text, boost::wregex(L"(EANON)"), L"HANOI");
 
 			text = boost::regex_replace(text, boost::wregex(L"(.*)(SWIFT MT )(.*)"), L"");
 			//text = boost::regex_replace(text, boost::wregex(L"(BE[HN]{1}EFICIARY|FIENEFICLART|BENEBWWT)(.*)"), L"");
@@ -3312,6 +3314,7 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"(SAMU)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(DAEJUNG)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(WHANAM)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(NMBBANKTTD)"), L"NMB BANK LTD");
 
 			if (text.length() <= 2)
 				return std::make_pair(std::get<0>(a), L"");
@@ -12706,13 +12709,14 @@ namespace selvy {
 				const std::wstring FIELD_NAME = L"SWIFT MT SENDER";
 				std::vector<std::wstring> extracted_result;
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
-
+				
+				
 				result = extract_field_values(fields.at(FIELD_NAME), blocks,
-					search_self,
+					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 1.6, 100, true), // 우측 여러 라인일때
 					preprocess_sender,
 					default_extract,
 					postprocess_uppercase);
-				
+
 				if (result.empty()) {
 					result = extract_field_values(fields.at(FIELD_NAME), blocks,
 						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 1.6, 100, true), // 우측 여러 라인일때
@@ -12723,7 +12727,7 @@ namespace selvy {
 
 				if (result.empty()) {
 					result = extract_field_values(fields.at(FIELD_NAME), blocks,
-						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, true),
 						preprocess_sender,
 						default_extract,
 						postprocess_uppercase);
@@ -12742,6 +12746,9 @@ namespace selvy {
 						if (str.find(L"BEHEFICIARY") != std::wstring::npos ||
 							str.find(L"BENEFICIARY") != std::wstring::npos ||
 							str.find(L"FIENEFICLART") != std::wstring::npos ||
+							str.find(L"U4222043350") != std::wstring::npos ||
+							str.find(L"S0032026304") != std::wstring::npos ||
+							str.find(L"SENDERS") != std::wstring::npos ||
 							str.find(L"BENEBWWT") != std::wstring::npos) {
 							extracted_result.resize(i);
 							break;
@@ -15450,25 +15457,39 @@ namespace selvy {
 				//text = boost::regex_replace(text, boost::wregex(L":"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(DATE)(.*)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"[«:]{1}"), L""); 
+				text = boost::regex_replace(text, boost::wregex(L"83I"), L"831");
+				text = boost::regex_replace(text, boost::wregex(L"LCP"), L"LC0");
+				text = boost::regex_replace(text, boost::wregex(L"O03"), L"003");
+				text = boost::regex_replace(text, boost::wregex(L"(£9O；|I9UI)"), L"1901");
+				text = boost::regex_replace(text, boost::wregex(L"2Q28O2O"), L"2028020");
+				text = boost::regex_replace(text, boost::wregex(L"[38]{1}-004"), L"S-004");
+				text = boost::regex_replace(text, boost::wregex(L"(0000[(]{1}쇼)"), L"00000");
+
 				return std::make_pair(std::get<0>(a), text);
 			}
 
 			static std::pair<cv::Rect, std::wstring>
 				preprocess_amount(const std::pair<cv::Rect, std::wstring>& a)
 			{
-				auto text = std::get<1>(a);
+				auto text = boost::to_upper_copy(std::get<1>(a));
+				text = boost::regex_replace(text, boost::wregex(L"[^A-Z0-9,]"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(AMOUNT)"), L"");
 				
 				text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
-				text = boost::regex_replace(text, boost::wregex(L":"), L"");
-				text = boost::regex_replace(text, boost::wregex(L";"), L"");
-				//text = boost::regex_replace(text, boost::wregex(L"[:;-)]"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"(Tolerance)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"I"), L"1");
+				text = boost::regex_replace(text, boost::wregex(L"(OCX)"), L"000");
+				text = boost::regex_replace(text, boost::wregex(L"(PR)"), L"9.");
+				//text = boost::regex_replace(text, boost::wregex(L"(R)"), L".");
+
+				text = boost::regex_replace(text, boost::wregex(L"(TOLERANCE|TOLEANCE)(.*)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(TOLERA[NH]{1}CE)(.*)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(QUANTrTY)(.*)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"0SD"), L"USD"); 
-				text = boost::regex_replace(text, boost::wregex(L"UoD"), L"USD");
+				text = boost::regex_replace(text, boost::wregex(L"UOD"), L"USD");
+				text = boost::regex_replace(text, boost::wregex(L"GSD"), L"USD");
 				text = boost::regex_replace(text, boost::wregex(L"새0때T"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"amount"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"32B"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"6CCOO"), L"600.00");
 				return std::make_pair(std::get<0>(a), text);
 			}
 

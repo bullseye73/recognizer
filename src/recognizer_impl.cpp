@@ -1,23 +1,32 @@
-﻿#ifndef __SERVICE_MODULE__
-#define __USE_CACHE__ true
-#define __USE_INPROC__ true
-#define __USE_ENGINE__ 0
-#else
-#define __USE_CACHE__ false
-#define __USE_INPROC__ false
-#endif
-#define __CACHE_DIRCTORY__ L"C:\\workspace\\vs2015\\OUTPUT\\cache"
-#define __LOG_FILE_NAME__ L"C:\\workspace\\vs2015\\OUTPUT\\log_result.txt"
+﻿//
+//
 
+#ifndef __SERVICE_MODULE__
+	#define __USE_CACHE__ true
+	#define __USE_INPROC__ true
+	#define __USE_ENGINE__ true
+#else
+	#define __USE_CACHE__ false
+	#define __USE_INPROC__ false
+#endif
+
+#define __CACHE_DIRECTORY__ L"D:\\workspace\\OCR\\IBK\\cache"
+#define __LOG_FILE_NAME__ L"D:\\workspace\\OCR\\IBK\\OUTPUT\\log\\log.txt"
+#define __RES_FILE_NAME__ L"D:\\workspace\\OCR\\IBK\\OUTPUT\\res\\res.txt"
+
+//#define __NO_FINEREADER__
+//#define SAMPLETEST
+//#define SAMPLETESTNAME L"D:\\work\\190710(kb_entrust)\\res\\res.rtf"
+//#define __NO_MERGE_VER__
+#define __MERGE_VER__ true
 #define NOMINMAX
 #define LOG_USE_WOFSTREAM
 #define WRITE_TRADE_TXT
-#define WRITE_FILE_DIR L"C:\\workspace\\vs2015\\OUTPUT\\result"
+#define WRITE_FILE_DIR L"D:\\workspace\\OCR\\IBK\\OUTPUT\\res"
 #define DEFAULT_FAX_COLUMN_VALUE_FOR_CODE L""
 #define DEFAULT_FAX_COLUMN_VALUE_FOR_STRING L"N/A"
 #define DEFAULT_FAX_COLUMN_VALUE_FOR_PRD L"999"
 #define DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER L""
-
 
 #include <windows.h>
 #include <atlsafe.h>
@@ -36,7 +45,7 @@
 #include <boost/range/algorithm/remove_if.hpp>
 #include <boost/range/algorithm_ext/erase.hpp>
 #include <boost/locale.hpp>
-
+#include <dlib/threads.h>
 
 #include <yaml-cpp/yaml.h>
 #include <fmt/format.h>
@@ -66,6 +75,16 @@
 #include <locale>
 #include <codecvt>
 
+namespace std {
+	template <> struct std::hash<std::pair<cv::Rect, std::wstring>>
+	{
+		inline size_t operator()(const std::pair<cv::Rect, std::wstring> &v)
+		{
+			return std::hash<std::wstring>()(std::get<1>(v));
+		}
+	};
+}
+
 namespace selvy {
 	namespace ocr {
 		int to_confidence(const std::vector<std::vector<int>>& confidences)
@@ -79,7 +98,7 @@ namespace selvy {
 				}
 			}
 
-			return static_cast<float>(sum / std::max(1, count));
+			return static_cast<float>(sum) / std::max(1, count);
 		}
 #if defined(_DEBUG)
 		static cv::Mat debug_;
@@ -148,14 +167,14 @@ namespace selvy {
 				virtual ~memory_reader() = default;
 
 				HRESULT
-					QueryInterface(const IID& riid, void** ppvobject) override
+					QueryInterface(const IID& riid, void** ppvObject) override
 				{
-					*ppvobject = nullptr;
+					*ppvObject = nullptr;
 
 					const auto uuid = __uuidof(FREngine::IReadStream);
 
 					if (riid == IID_IUnknown || riid == __uuidof(FREngine::IReadStream)) {
-						*ppvobject = this;
+						*ppvObject = this;
 						AddRef();
 						return S_OK;
 					}
@@ -180,12 +199,12 @@ namespace selvy {
 				}
 
 				HRESULT
-					raw_Read(SAFEARRAY** data, int count, int* bytesRead) override
+					raw_Read(SAFEARRAY** Data, int Count, int* BytesRead) override
 				{
-					CComSafeArray<unsigned char> buffer(count);
-					stream_.read(static_cast<char*>(buffer.m_psa->pvData), count);
-					*bytesRead = stream_.gcount();
-					*data = buffer.Detach();
+					CComSafeArray<unsigned char> buffer(Count);
+					stream_.read(static_cast<char*>(buffer.m_psa->pvData), Count);
+					*BytesRead = stream_.gcount();
+					*Data = buffer.Detach();
 					return S_OK;
 				}
 
@@ -205,10 +224,32 @@ namespace selvy {
 		static std::mutex locks_;
 		static std::pair<std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>>, std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>>> engine_pool_;
 
+		static int get_levenstein_distance(std::wstring a, std::wstring b, bool need_cut = false)
+		{
+			if (a.empty() || b.empty())
+				return SymSpell::DamerauLevenshteinDistance(a, b);
+
+			boost::remove_erase_if(a, boost::is_any_of(L" .,"));
+			boost::remove_erase_if(b, boost::is_any_of(L" .,"));
+
+			if (need_cut) {
+				int min_size = a.size() > b.size() ? b.size() : a.size();
+				if (min_size > 10) {
+					a.resize(min_size);
+					b.resize(min_size);
+				}
+			}
+
+			return SymSpell::DamerauLevenshteinDistance(a, b);
+		}
+		static int get_distance_threshold(const std::wstring a)
+		{
+			return a.size() > 5 ? 2 : a.size() > 3 ? 1 : 0;
+		}
+
 		void
 			allocate_engine_pool(const configuration& configuration, bool inproc)
 		{
-#ifdef __USE_ENGINE_POOL__
 			locks_.lock();
 
 			CLSID cls_id;
@@ -219,11 +260,8 @@ namespace selvy {
 
 			std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>> free_engine_pool;
 
-#ifndef __SERVICE_MODULE__
-			const auto engine_counts = 1;
-#else
-			const auto engine_counts = 1;
-#endif
+			const auto engine_counts = std::stoi(configuration.at(L"service").at(L"pool"));
+
 			for (auto i = 0; i < engine_counts; i++) {
 				CComPtr<FREngine::IEngineLoader> loader;
 				FREngine::IEnginePtr engine;
@@ -247,13 +285,11 @@ namespace selvy {
 
 			engine_pool_ = std::make_pair(free_engine_pool, std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>>());
 
-			locks_.unlcok();
-#endif
+			locks_.unlock();
 		}
 
 		void deallocate_engine_pool()
 		{
-#ifdef __USE_ENGINE_POOL__
 			locks_.lock();
 
 			std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>> free_engine_pool;
@@ -283,89 +319,84 @@ namespace selvy {
 			engine_pool_.second.clear();
 
 			locks_.unlock();
-#endif
 		}
 
-#ifdef __USE_ENGINE_POOL__
 		std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>
-			get_engine_object(const configuration& configuation)
+			get_engine_object(const selvy::ocr::configuration& configuration, bool use_pool)
 		{
-			locks_.lock();
-
 			CComPtr<FREngine::IEngineLoader> loader;
 			FREngine::IEnginePtr engine;
 
-			do {
+			if (use_pool) {
+				locks_.lock();
+
+				do {
+					std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>> free_engine_pool;
+					std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>> used_engine_pool;
+					std::tie(free_engine_pool, used_engine_pool) = engine_pool_;
+
+					if (!free_engine_pool.empty()) {
+						std::tie(loader, engine) = free_engine_pool.back();
+						free_engine_pool.pop_back();
+						used_engine_pool.push_back(std::make_pair(loader, engine));
+						break;
+					}
+
+					std::this_thread::sleep_for(std::chrono::seconds(1));
+				} while (engine == nullptr);
+
+				locks_.unlock();
+			}
+			else {
+				CLSID cls_id;
+				const auto inproc = __USE_INPROC__;
+
+				if (inproc)
+					CLSIDFromProgID(L"FREngine.InprocLoader", &cls_id);
+				else
+					CLSIDFromProgID(L"FREngine.OutprocLoader", &cls_id);
+
+				do {
+					try {
+						if (loader == nullptr)
+							loader.CoCreateInstance(cls_id, nullptr, inproc ? CLSCTX_INPROC_SERVER : CLSCTX_LOCAL_SERVER);
+
+						engine = loader->InitializeEngine(configuration.at(L"engine").at(L"license").c_str(), L"", L"", L"", L"", VARIANT_FALSE);
+					}
+					catch (_com_error& e) {
+						if (loader)
+							loader->ExplicitlyUnload();
+						std::this_thread::sleep_for(std::chrono::seconds(1));
+					}
+				} while (engine == nullptr);
+			}
+
+			return std::make_pair(loader, engine);
+		}
+
+		void release_engine_object(const std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>& engine_handle, bool use_pool)
+		{
+			if (use_pool) {
+				locks_.lock();
 				std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>> free_engine_pool;
 				std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>> used_engine_pool;
 				std::tie(free_engine_pool, used_engine_pool) = engine_pool_;
+				boost::remove_erase(used_engine_pool, engine_handle);
+				free_engine_pool.emplace_back(engine_handle);
+				locks_.unlock();
+			}
+			else {
+				CComPtr<FREngine::IEngineLoader> loader;
+				FREngine::IEnginePtr engine;
+				std::tie(loader, engine) = engine_handle;
 
-				if (!free_engine_pool.empty()) {
-					std::tie(loader, engine) = free_engine_pool.back();
-					free_engine_pool.pop_back();
-					used_engine_pool.push_back(std::make_pair(loader, engine));
-					break;
-				}
-
-				std::this_thread::sleep_for(std::chrono::seconds(1));
-			} while (engine == nullptr);
-
-			locks_.unlock();
-			return std::make_pair(loader, engine);
-		}
-#else
-		std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>
-			get_engine_object(const configuration& configuration, bool inproc = __USE_INPROC__)
-		{
-			CLSID cls_id;
-			if (inproc)
-				CLSIDFromProgID(L"FREngine.InprocLoader", &cls_id);
-			else
-				CLSIDFromProgID(L"FREngine.OutprocLoader", &cls_id);
-
-			CComPtr<FREngine::IEngineLoader> loader;
-			FREngine::IEnginePtr engine;
-
-			do {
-				try {
-					if (loader == nullptr)
-						loader.CoCreateInstance(cls_id, nullptr, inproc ? CLSCTX_INPROC_SERVER : CLSCTX_LOCAL_SERVER);
-
-					engine = loader->InitializeEngine(configuration.at(L"engine").at(L"license").c_str(), L"", L"", L"", L"", VARIANT_FALSE);
-				}
-				catch (_com_error& e) {
-					if (loader)
-						loader->ExplicitlyUnload();
-					spdlog::get("recognizer")->info("recognize engine load fail!");
-					std::this_thread::sleep_for(std::chrono::seconds(1));
-				}
-			} while (engine == nullptr && !__USE_CACHE__);
-			return std::make_pair(loader, engine);
-		}
-#endif
-
-		void release_engine_object(const std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>& engine_handle)
-		{
-#ifdef __USE_ENGINE_POOL__
-			locks_.lock();
-			std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>> free_engine_pool;
-			std::vector<std::pair<CComPtr<FREngine::IEngineLoader>, FREngine::IEnginePtr>> used_engine_pool;
-			std::tie(free_engine_pool, used_engine_pool) = engine_pool_;
-			boost::remove_erase(used_engine_pool, engine_handle);
-			free_engine_pool.emplace_back(engine_handle);
-			locks_.unlock();
-#else
-			CComPtr<FREngine::IEngineLoader> loader;
-			FREngine::IEnginePtr engine;
-			std::tie(loader, engine) = engine_handle;
-
-			if (loader)
-				loader->ExplicitlyUnload();
-#endif
+				if (loader)
+					loader->ExplicitlyUnload();
+			}
 		}
 
 		inline std::shared_ptr<SymSpell>
-			build_spell_dictionary(const std::vector < std::wstring>& words, const int distance = 2)
+			build_spell_dictionary(const std::vector<std::wstring>& words, const int distance = 2)
 		{
 			auto dictionary = std::make_shared<SymSpell>();
 			dictionary->editDistanceMax = distance;
@@ -441,8 +472,8 @@ namespace selvy {
 
 		inline std::tuple<std::map<std::wstring, double>, std::map<std::wstring, double>, int, int>
 			get_weights(const configuration& configuration,
-			const std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::tuple<std::map<std::wstring, double>, std::map<std::wstring, double>, int, int>>>& weight,
-			const std::wstring& weight_category)
+				const std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::tuple<std::map<std::wstring, double>, std::map<std::wstring, double>, int, int>>>& weight,
+				const std::wstring& weight_category)
 		{
 			const auto profile = configuration.at(L"setting").at(L"profile");
 			if (weight.find(profile) == weight.end() || weight.at(profile).find(weight_category) == weight.at(profile).end())
@@ -515,7 +546,7 @@ namespace selvy {
 						if (min_distance_category.find(category_name) != min_distance_category.end())
 							distance = 1;
 
-						auto dictionary = build_spell_dictionary(words, 1);
+						auto dictionary = build_spell_dictionary(words, distance);
 						dictionary->Save(to_cp949(spell_dictionary_file));
 					}
 
@@ -530,9 +561,9 @@ namespace selvy {
 
 		inline std::vector<std::wstring>
 			get_dictionary_words(const configuration& configuration,
-			const std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::vector<std::wstring>>>&
-			dictionary,
-			const std::wstring& dictionary_category)
+				const std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::vector<std::wstring>>>&
+				dictionary,
+				const std::wstring& dictionary_category)
 		{
 			const auto profile = configuration.at(L"setting").at(L"profile");
 			if (dictionary.find(profile) == dictionary.end() || dictionary.at(profile).find(dictionary_category) == dictionary
@@ -542,53 +573,44 @@ namespace selvy {
 			return dictionary.at(profile).at(dictionary_category);
 		}
 
-
 		std::unordered_map < std::wstring, std::unordered_map <
 			std::wstring, std::unordered_map<std::wstring, std::vector<std::wstring>> >>
 			load_keywords(const std::wstring& data_directory)
 		{
 			std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::vector<std::wstring>>>>
 				keywords;
-			try {
-				for (auto& entry : boost::filesystem::directory_iterator(data_directory)) {
-					if (!boost::filesystem::is_directory(entry))
+
+			for (auto& entry : boost::filesystem::directory_iterator(data_directory)) {
+				if (!boost::filesystem::is_directory(entry))
+					continue;
+
+				std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::vector<std::wstring>>> profile_keywords;
+				for (auto& category_entry : boost::filesystem::directory_iterator(fmt::format(L"{}\\categories", entry.path().native()))) {
+					if (!boost::filesystem::is_directory(category_entry))
 						continue;
-					std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::vector<std::wstring>>> profile_keywords;
 
-					for (auto& category_entry : boost::filesystem::directory_iterator(fmt::format(L"{}\\categories", entry.path().native()))) {
-						if (!boost::filesystem::is_directory(category_entry))
-							continue;
-						const auto& category_directory = category_entry.path();
-						const auto rule_file = fmt::format(L"{}\\rules.yaml", category_directory.native());
+					const auto& category_directory = category_entry.path();
+					const auto rule_file = fmt::format(L"{}\\rules.yaml", category_directory.native());
 
-						if (!boost::filesystem::exists(rule_file))
-							continue;
+					if (!boost::filesystem::exists(rule_file))
+						continue;
 
-						std::unordered_map<std::wstring, std::vector<std::wstring>> category_keywords;
-						auto rules = YAML::LoadFile(to_cp949(boost::filesystem::absolute(rule_file).native()));
-						for (const auto& rule : rules) {
-							std::vector<std::wstring> words;
-							std::transform(std::begin(rule["keywords"]), std::end(rule["keywords"]), std::back_inserter(words),
-								[](const YAML::Node& node) {
-								return node.as<std::wstring>();
-							});
+					std::unordered_map<std::wstring, std::vector<std::wstring>> category_keywords;
+					auto rules = YAML::LoadFile(to_cp949(boost::filesystem::absolute(rule_file).native()));
+					for (const auto& rule : rules) {
+						std::vector<std::wstring> words;
+						std::transform(std::begin(rule["keywords"]), std::end(rule["keywords"]), std::back_inserter(words),
+							[](const YAML::Node& node) {
+							return node.as<std::wstring>();
+						});
 
-							category_keywords.emplace(std::make_pair(rule["field"].as<std::wstring>(), words));
-						}
-
-						profile_keywords.emplace(std::make_pair(category_entry.path().filename().native(), category_keywords));
+						category_keywords.emplace(std::make_pair(rule["field"].as<std::wstring>(), words));
 					}
-					keywords.emplace(std::make_pair(entry.path().filename().native(), profile_keywords));
+
+					profile_keywords.emplace(std::make_pair(category_entry.path().filename().native(), category_keywords));
 				}
-			}
-			catch (const boost::filesystem::filesystem_error& e)
-			{
-				if (e.code() == boost::system::errc::permission_denied)
-					std::cout << "Search permission is denied for one of the directories "
-					<< "in the path prefix of " << "\n";
-				else
-					std::cout << "is_directory(" << ") failed with "
-					<< e.code().message() << '\n';
+
+				keywords.emplace(std::make_pair(entry.path().filename().native(), profile_keywords));
 			}
 
 			return keywords;
@@ -596,9 +618,9 @@ namespace selvy {
 
 		inline std::unordered_map<std::wstring, std::vector<std::wstring>>
 			get_keywords(const configuration& configuration,
-			const std::unordered_map < std::wstring, std::unordered_map <
-			std::wstring, std::unordered_map<std::wstring, std::vector<std::wstring>> >> &keywords,
-			const std::wstring& category)
+				const std::unordered_map < std::wstring, std::unordered_map <
+				std::wstring, std::unordered_map<std::wstring, std::vector<std::wstring>> >> &keywords,
+				const std::wstring& category)
 		{
 			const auto profile = configuration.at(L"setting").at(L"profile");
 
@@ -658,7 +680,7 @@ namespace selvy {
 			const auto count_of_text = static_cast<double>(cv::countNonZero(binarized));
 			const auto text_background_ratio = count_of_text / binarized.total();
 
-			if (text_background_ratio > 0.4 || text_background_ratio < 0.015)
+			if (text_background_ratio > 0.383 || text_background_ratio < 0.015)
 				return true;
 
 			return false;
@@ -666,10 +688,10 @@ namespace selvy {
 
 		static std::wstring
 			classify_document(const FREngine::IEnginePtr& engine, const configuration& configuration,
-			const FREngine::IClassificationEnginePtr& classification_engine,
-			FREngine::IModelPtr& model,
-			const boost::filesystem::path& file, const FREngine::IFRDocumentPtr& document,
-			bool use_cache = __USE_CACHE__)
+				const FREngine::IClassificationEnginePtr& classification_engine,
+				FREngine::IModelPtr& model,
+				const boost::filesystem::path& file, const FREngine::IFRDocumentPtr& document,
+				bool use_cache = __USE_CACHE__)
 		{
 			cv::TickMeter classification_ticks;
 			classification_ticks.start();
@@ -678,7 +700,7 @@ namespace selvy {
 			const auto file_name = file.filename().native();
 			auto file_name_without_ext = file_name.substr(0, file_name.size() - 4);
 			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_001"), L"");
-			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.classification.cache", __CACHE_DIRCTORY__, file_name_without_ext)).native();
+			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.classification.cache", __CACHE_DIRECTORY__, file_name_without_ext)).native();
 
 			std::wstring category;
 			double confidence = 0.;
@@ -688,7 +710,7 @@ namespace selvy {
 					try {
 						dlib::deserialize(to_cp949(cache_file)) >> category >> confidence;
 						classification_ticks.stop();
-						spdlog::get("recognizer")->info("classify document : {} ({:2f}mSec, category : {} ({:.2f}), cache : true)",
+						spdlog::get("recognizer")->info("classify document : {} ({:.2f}mSec, category : {} ({:.2f}), cache : true)",
 							to_cp949(file.filename().native()), classification_ticks.getTimeMilli(),
 							to_cp949(category), confidence);
 #ifdef LOG_USE_WOFSTREAM
@@ -731,7 +753,31 @@ namespace selvy {
 
 			document->Analyze(nullptr, nullptr, nullptr);
 
+			if (configuration.at(L"setting").at(L"profile") == L"trade") {
+				const auto height = document->Pages->Item(0)->ImageDocument->GrayImage->Height;
+				const auto layout_blocks = document->Pages->Item(0)->Layout->Blocks;
+				for (auto i = layout_blocks->Count - 1; i >= 0; i--) {
+					const auto top = layout_blocks->Item(i)->Region->BoundingRectangle->Top;
+					if (top > height / 2) {
+						layout_blocks->DeleteAt(i);
+					}
+				}
+
+				if (layout_blocks->Count == 0) {
+					classification_ticks.stop();
+					spdlog::get("recognizer")->info("classify document : {} ({:.2f}mSec, category : {} ({:.2f}), cache : false)",
+						to_cp949(file.filename().native()),
+						classification_ticks.getTimeMilli(), to_cp949(category), confidence);
+					return L"";
+				}
+			}
+
 			document->Recognize(nullptr, nullptr);
+#ifdef SAMPLETEST	
+			document->Export(SAMPLETESTNAME, FREngine::FEF_RTF, 0);
+			std::cout << "aaaaaa";
+
+#endif
 			auto classification_object = classification_engine->CreateObjectFromDocument(document);
 			auto suitable_classifier = classification_object->SuitableClassifiers;
 
@@ -756,8 +802,21 @@ namespace selvy {
 				txt_file << L"- confidence : " << confidence << std::endl;
 				txt_file.close();
 #endif
-				if (confidence < 0.65)
-					category = L"";
+				if (confidence < 0.65 && configuration.at(L"setting").at(L"profile") == L"trade") {
+					const std::wstring text = document->Pages->Item(0)->PlainText->Text;
+					if (boost::regex_search(text, boost::wregex(L"BILL\\s*OF\\sLADING", boost::regex_constants::icase))) {
+						category = L"BILL OF LADING";
+						confidence = 0.8;
+					}
+					else {
+						category = L"";
+					}
+				}
+
+				if (confidence > 0.61 && configuration.at(L"setting").at(L"profile") == L"fax"
+					&& category == L"Financial Transaction Information Request") {
+					confidence = 0.65;
+				}
 			}
 
 			if (need_serialization) {
@@ -804,7 +863,7 @@ namespace selvy {
 			if (blocks.empty())
 				return rect;
 
-			return std::accumulate(std::begin(blocks), std::end(blocks), to_rect(*std::begin(blocks)),
+			return std::accumulate(std::next(std::begin(blocks)), std::end(blocks), to_rect(*std::begin(blocks)),
 				[](const cv::Rect& rect, const std::pair<cv::Rect, std::wstring>& block) {
 				return rect | to_rect(block);
 			});
@@ -866,18 +925,19 @@ namespace selvy {
 			if (blocks.empty())
 				return rect;
 
-			return std::accumulate(std::begin(blocks), std::end(blocks), to_rect(*std::begin(blocks)),
+			return std::accumulate(std::next(std::begin(blocks)), std::end(blocks), to_rect(*std::begin(blocks)),
 				[](const cv::Rect& rect, const block& block) {
 				return rect | to_rect(block);
 			});
 		}
 
 		inline std::wstring
-			to_wstring(const std::tuple<cv::Rect, std::wstring, cv::Range>& block, bool end = false)
+			to_wstring(const std::tuple<cv::Rect, std::wstring, cv::Range>& block, bool end = false, bool is_all = false)
 		{
 			const auto text = std::get<1>(block);
 			const auto range = std::get<2>(block);
-
+			if (is_all)
+				return std::wstring(std::begin(text), std::end(text));
 			if (end)
 				return std::wstring(std::begin(text) + range.end, std::end(text));
 
@@ -983,13 +1043,12 @@ namespace selvy {
 			to_character(const wchar_t ch, int left, int top, int right, int bottom)
 		{
 			static const std::unordered_map<wchar_t, wchar_t> CONVERSIONS{
-				//특수문자
-				std::make_pair(L'◆', L'-'),
+				std::make_pair(L'�', L'-'),
 				std::make_pair(L'：', L':'),
-				std::make_pair(L'、', L','),
+				std::make_pair(L'，', L','),
 				std::make_pair(L'■', L' '),
-				std::make_pair(L'­­-', L'-'),
-				std::make_pair(L'―', L'-'),
+				std::make_pair(L'—', L'-'),
+				std::make_pair(L'ᅳ', L'-'),
 				std::make_pair(0xff3b, L'['),
 				std::make_pair(0xff3d, L']'),
 				std::make_pair(0xff08, L'('),
@@ -1017,7 +1076,7 @@ namespace selvy {
 		}
 
 		inline cv::Size
-			estimate_paper_size(const std::vector < block>& blocks)
+			estimate_paper_size(const std::vector<block>& blocks)
 		{
 			if (blocks.empty())
 				return cv::Size();
@@ -1139,7 +1198,7 @@ namespace selvy {
 				L"영",
 			};
 
-			const static std::vector<std::set<std::wstring>> SETS_2 {
+			const static std::vector<std::set<std::wstring>> SETS_2{
 				{ L"사", L"건", },
 				{ L"채", L"권", L"자", },
 				{ L"채", L"무", L"자", },
@@ -1175,7 +1234,8 @@ namespace selvy {
 						if (!next_blocks.empty()) {
 							const auto nearest_block = std::min_element(std::begin(next_blocks), std::end(next_blocks),
 								[&](const block& a, const block& b) {
-								return to_rect(a).x - rect_a.br().x < to_rect(b).x - rect_a.br().x;
+								return to_rect(a).x - rect_a.br().x < to_rect(b).x - rect_a
+									.br().x;
 							});
 
 							if (to_rect(*nearest_block) == rect_b)
@@ -1424,46 +1484,59 @@ namespace selvy {
 			std::vector<int> confidence;
 			for (auto i = 0; i < text.size(); i++) {
 				auto& c = text[i];
-					if (c == paragraph_break) {
-						if (!word.empty())
-							line.emplace_back(word);
-						if (!line.empty())
-							block.emplace_back(line);
-						if (!block.empty()) {
-							blocks.emplace_back(block);
-							confidences.emplace_back(confidence);
-						}
-						word.clear();
-						line.clear();
-						block.clear();
+				if (c == paragraph_break) {
+					if (!word.empty())
+						line.emplace_back(word);
+					if (!line.empty())
+						block.emplace_back(line);
+					if (!block.empty()) {
+						blocks.emplace_back(block);
+						confidences.emplace_back(confidence);
 					}
-					else if (c == line_break || c == line_break2) {
-						if (!word.empty())
-							line.emplace_back(word);
-						if (!line.empty())
-							block.emplace_back(line);
-						word.clear();
-						line.clear();
-					}
-					else if (c == word_break || c == word_break2) {
-						if (!word.empty())
-							line.emplace_back(word);
-						word.clear();
-					}
-					else {
-						word.emplace_back(to_character(c, left_borders[i], top_borders[i], right_borders[i], bottom_borders[i]));
-						confidence.emplace_back(c_confidences[i]);
-					}
+					word.clear();
+					line.clear();
+					block.clear();
+				}
+				else if (c == line_break || c == line_break2) {
+					if (!word.empty())
+						line.emplace_back(word);
+					if (!line.empty())
+						block.emplace_back(line);
+					word.clear();
+					line.clear();
+				}
+				else if (c == word_break || c == word_break2) {
+					if (!word.empty())
+						line.emplace_back(word);
+					word.clear();
+				}
+				else {
+					word.emplace_back(to_character(c, left_borders[i], top_borders[i], right_borders[i], bottom_borders[i]));
+					confidence.emplace_back(c_confidences[i]);
+				}
 			}
 			return std::make_pair(blocks, confidences);
 		}
 
-		inline void remove_null_char(std::vector<block>& blocks) {
+		inline void
+			remove_small_character(std::vector<block>& blocks)
+		{
 			for (auto& block : blocks) {
 				for (auto& line : block) {
 					for (auto& word : line) {
-						boost::remove_erase_if(word, [](std::pair<cv::Rect, wchar_t>& character) {
-							return character.second == L'\0';
+						float avg_char_height = 0;
+						int count = 0;
+						for (auto i = 0; i < word.size(); i++) {
+							if (std::get<1>(word[i]) >= L'가' && std::get<1>(word[i]) <= L'힣') {
+								avg_char_height += to_rect(word[i]).height;
+								count++;
+							}
+						}
+						avg_char_height /= count;
+
+						boost::remove_erase_if(word, [&avg_char_height](const character& ch) {
+							//return to_rect(ch).height * 1.5 < avg_char_height && (std::get<1>(ch) >= L'가' && std::get<1>(ch) <= L'힣');
+							return to_rect(ch).height * 1.5 < avg_char_height && std::get<1>(ch) != L'-';
 						});
 					}
 				}
@@ -1473,18 +1546,10 @@ namespace selvy {
 		inline void
 			refine_blocks(std::vector<block>& blocks, bool merge_blocks = true, bool merge_lines = true, bool merge_words = true, bool divide_words = false)
 		{
-			remove_null_char(blocks);
-
-			std::sort(blocks.begin(), blocks.end(), [](block& a, block& b) {
-				return to_rect(a).y < to_rect(b).y;
-			});
-
 			while (merge_blocks) {
 				merge_blocks = false;
 
 				for (auto i = 0; i < blocks.size(); i++) {
-					auto str = to_wstring(blocks[i], false);
-					auto block = blocks[i];
 					for (auto j = 1; j < blocks.size(); j++) {
 						if (i < blocks.size() && j < blocks.size() && combine_blocks(blocks, blocks[i], blocks[j])) {
 							blocks.erase(std::begin(blocks) + j);
@@ -1506,9 +1571,6 @@ namespace selvy {
 			if (merge_lines) {
 				for (auto& block : blocks) {
 					for (auto i = 0; i < block.size(); i++) {
-						auto line_i = block[i];
-						auto str = to_wstring(line_i, false);
-						//printf("break!\n");
 						for (auto j = 1; j < block.size(); j++) {
 							if (i < block.size() && j < block.size() && combine_lines(block, block[i], block[j])) {
 								block.erase(std::begin(block) + j);
@@ -1589,18 +1651,23 @@ namespace selvy {
 							return to_rect(a).x < to_rect(b).x;
 						});
 						for (auto i = 0; i < block[l].size() - 1; i++) {
-							if (block[l][i].empty() || block[l][i].size() < 3)
+							if (block[l][i].empty())
 								continue;
 							auto rect1 = to_rect(block[l][i]);
 							auto rect2 = to_rect(block[l][i + 1]);
-							if (rect1.br().x + rect1.width * 1.5 < rect2.x) {
+							auto thresh = rect1.width * (block[l][i].size() > 4 ? 0.5 : 1.5);
+							if (block[l][i].size() < 3) {
+								thresh = 100;
+							}
+
+							if (rect1.br().x + thresh < rect2.x) {
 								ocr::line line1, line2;
 								line1.insert(line1.end(), block[l].begin(), block[l].begin() + i + 1);
 								line2.insert(line2.end(), block[l].begin() + i + 1, block[l].end());
 								block.emplace_back(line1);
 								block.emplace_back(line2);
-								block.erase(std::begin(block) + 1);
-								i--;
+								block.erase(std::begin(block) + l);
+								l--;
 								break;
 							}
 						}
@@ -1664,8 +1731,8 @@ namespace selvy {
 			//const auto prefix = engine->CreateRecognizerParams()->TextLanguage->BaseLanguages->Count == 1 ? L"en" : L"ko";
 			const auto file_name = file.filename().native();
 			auto file_name_without_ext = file_name.substr(0, file_name.size() - 4);
-			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_OO1"), L"");
-			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.{}.recognituon.cache", __CACHE_DIRCTORY__, file_name_without_ext, prefix)).native();
+			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_001"), L"");
+			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.{}.recognituon.cache", __CACHE_DIRECTORY__, file_name_without_ext, prefix)).native();
 			return !boost::filesystem::exists(cache_file);
 		}
 
@@ -1679,14 +1746,14 @@ namespace selvy {
 			//const auto prefix = engine->CreateRecognizerParams()->TextLanguage->BaseLanguages->Count == 1 ? L"en" : L"ko";
 			const auto file_name = file.filename().native();
 			auto file_name_without_ext = file_name.substr(0, file_name.size() - 4);
-			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_OO1"), L"");
-			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.{}.recognituon.cache", __CACHE_DIRCTORY__, file_name_without_ext, prefix)).native();
+			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_001"), L"");
+			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.{}.recognituon.cache", __CACHE_DIRECTORY__, file_name_without_ext, prefix)).native();
 			return !boost::filesystem::exists(cache_file);
 		}
 
 		static std::tuple<std::vector<block>, std::vector<std::vector<int>>, cv::Size>
 			recognize(const FREngine::IEnginePtr& engine, const configuration& configuration, const std::wstring& category, const boost::filesystem::path& file, const FREngine::IFRDocumentPtr &document,
-			bool use_cache = __USE_CACHE__)
+				bool use_cache = __USE_CACHE__)
 		{
 			cv::TickMeter recognition_ticks;
 			recognition_ticks.start();
@@ -1697,8 +1764,8 @@ namespace selvy {
 			//const auto prefix = engine->CreateRecognizerParams()->TextLanguage->BaseLanguages->Count == 1 ? L"en" : L"ko";
 			const auto file_name = file.filename().native();
 			auto file_name_without_ext = file_name.substr(0, file_name.size() - 4);
-			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_OO1"), L"");
-			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.{}.recognituon.cache", __CACHE_DIRCTORY__, file_name_without_ext, prefix)).native();
+			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_001"), L"");
+			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.{}.recognition.cache", __CACHE_DIRECTORY__, file_name_without_ext, prefix)).native();
 
 			auto need_serialization = false;
 			std::vector<block> blocks;
@@ -1706,7 +1773,7 @@ namespace selvy {
 			cv::Size image_size;
 
 			static const std::unordered_set<std::wstring> NEED_FULL_RECOGNITION{
-				L"BILL OF EXCHANGE", L"CERTIFACATE", L"CERTIFICATE OF ORIGIN", L"LETTER OF CREDIT", L"WAYBILL", L"SHIPMENT ADVICE", L"BILL OF LADING", L"INSURANCE POLICY"
+				L"BILL OF EXCHANGE", L"CERTIFICATE", L"CERTIFICATE OF ORIGIN", L"LETTER OF CREDIT", L"WAYBILL", L"SHIPMENT ADVICE", L"BILL OF LADING", L"INSURANCE POLICY", L"FIRM OFFER", L"REMITTANCE LETTER",
 			};
 
 			if (use_cache) {
@@ -1746,7 +1813,8 @@ namespace selvy {
 			document->Analyze(nullptr, nullptr, nullptr);
 
 			if (configuration.at(L"setting").at(L"profile") == L"trade") {
-				if (NEED_FULL_RECOGNITION.find(category) == NEED_FULL_RECOGNITION.end()) {
+
+				if (NEED_FULL_RECOGNITION.find(category) == NEED_FULL_RECOGNITION.end() && category != L"COMMERCIAL INVOICE") {
 					const auto height = document->Pages->Item(0)->ImageDocument->GrayImage->Height;
 					const auto layout_blocks = document->Pages->Item(0)->Layout->Blocks;
 
@@ -1782,7 +1850,7 @@ namespace selvy {
 
 		static std::tuple<std::vector<block>, std::vector<std::vector<int>>, cv::Size>
 			recognize_with_language(const FREngine::IEnginePtr& engine, const configuration& configuration, const std::wstring& category, const boost::filesystem::path& file, const FREngine::IFRDocumentPtr &document,
-			std::wstring language, bool use_cache = __USE_CACHE__)
+				std::wstring language, bool use_cache = __USE_CACHE__)
 		{
 			cv::TickMeter recognition_ticks;
 			recognition_ticks.start();
@@ -1793,8 +1861,8 @@ namespace selvy {
 			//const auto prefix = engine->CreateRecognizerParams()->TextLanguage->BaseLanguages->Count == 1 ? L"en" : L"ko";
 			const auto file_name = file.filename().native();
 			auto file_name_without_ext = file_name.substr(0, file_name.size() - 4);
-			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_OO1"), L"");
-			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.{}.recognituon.cache", __CACHE_DIRCTORY__, file_name_without_ext, prefix)).native();
+			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_001"), L"");
+			const auto cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.{}.recognituon.cache", __CACHE_DIRECTORY__, file_name_without_ext, prefix)).native();
 
 			auto need_serialization = false;
 			std::vector<block> blocks;
@@ -1874,9 +1942,9 @@ namespace selvy {
 
 		inline std::tuple<std::vector<block>, std::vector<std::vector<int>>, cv::Size>
 			recognize_document(const FREngine::IEnginePtr& engine, const configuration& configuration, const std::wstring& category,
-			const boost::filesystem::path& file, const FREngine::IFRDocumentPtr& document, bool merge_blocks = true,
-			bool merge_lines = true, bool merge_words = true, bool divide_words = false,
-			bool use_cache = __USE_CACHE__)
+				const boost::filesystem::path& file, const FREngine::IFRDocumentPtr& document, bool merge_blocks = true,
+				bool merge_lines = true, bool merge_words = true, bool divide_words = false,
+				bool use_cache = __USE_CACHE__)
 		{
 			const auto category_directory = fmt::format(L"{}\\{}", get_categories_directory(configuration), category);
 			bool need_serialization = needSerialization(configuration, category, file);
@@ -1890,7 +1958,6 @@ namespace selvy {
 				engine->LoadPredefinedProfile(configuration.at(L"engine").at(L"profile").c_str());
 				engine->LoadProfile(boost::filesystem::path(fmt::format(L"{}\\preset.ini", category_directory)).native().c_str());
 			}
-
 			std::vector<block> blocks;
 			std::vector<std::vector<int>> confidences;
 			cv::Size image_size;
@@ -1902,9 +1969,9 @@ namespace selvy {
 
 		inline std::tuple<std::vector<block>, std::vector<std::vector<int>>, cv::Size>
 			recognize_document_with_language(const FREngine::IEnginePtr& engine, const configuration& configuration, const std::wstring& category,
-			const boost::filesystem::path& file, const FREngine::IFRDocumentPtr& document, std::wstring language, bool merge_blocks = true,
-			bool merge_lines = true, bool merge_words = true, bool divide_words = false,
-			bool use_cache = __USE_CACHE__)
+				const boost::filesystem::path& file, const FREngine::IFRDocumentPtr& document, std::wstring language, bool merge_blocks = true,
+				bool merge_lines = true, bool merge_words = true, bool divide_words = false,
+				bool use_cache = __USE_CACHE__)
 		{
 			const auto category_directory = fmt::format(L"{}\\{}", get_categories_directory(configuration), category);
 			bool need_serialization = need_serialization_with_language(configuration, category, file, language);
@@ -1957,7 +2024,7 @@ namespace selvy {
 
 		inline std::tuple<std::vector<block>, std::vector<std::vector<int>>, cv::Size>
 			recognize_document(const FREngine::IEnginePtr& engine, const configuration& configuration, const FREngine::IFRDocumentPtr& document,
-			bool merge_blocks = true, bool merge_lines = true, bool merge_words = true)
+				bool merge_blocks = true, bool merge_lines = true, bool merge_words = true)
 		{
 			engine->CleanRecognizerSession();
 			engine->LoadPredefinedProfile(configuration.at(L"engine").at(L"profile").c_str());
@@ -1977,10 +2044,90 @@ namespace selvy {
 			return std::make_tuple(blocks, confidences, image_size);
 		}
 
+		inline std::tuple<std::wstring, std::vector<block>, cv::Size>
+			read_cache(const boost::filesystem::path& file)
+		{
+			const auto file_name = file.filename().native();
+			auto file_name_without_ext = file_name.substr(0, file_name.size() - 4);
+			file_name_without_ext = boost::regex_replace(file_name_without_ext, boost::wregex(L"_001"), L"");
+			const auto classification_cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.classification.cache", __CACHE_DIRECTORY__, file_name_without_ext)).native();
+
+			double confidence = 0.;
+			std::wstring category;
+			cv::TickMeter classification_ticks;
+			classification_ticks.start();
+			if (boost::filesystem::exists(classification_cache_file)) {
+				try {
+					dlib::deserialize(to_cp949(classification_cache_file)) >> category >> confidence;
+					classification_ticks.stop();
+					spdlog::get("recognizer")->info("classify document : {} ({:.2f}mSec, category : {} ({:.2f}), cache : true)",
+						to_cp949(file.filename().native()), classification_ticks.getTimeMilli(),
+						to_cp949(category), confidence);
+
+					if (confidence < 0.65)
+						category = L"";
+
+				}
+				catch (dlib::serialization_error&) {
+				}
+			}
+
+			cv::TickMeter recognition_ticks;
+			recognition_ticks.start();
+			std::wstring prefix = L"en";
+			if (category == L"LETTER OF CREDIT" || category == L"EXPORT PERMIT" || category == L"BILL OF EXCHANGE-KOR" || category == L"Financial Transaction Information Request") {
+				prefix = L"ko";
+			}
+			const auto recognition_cache_file = boost::filesystem::path(fmt::format(L"{}\\{}.{}.recognition.cache", __CACHE_DIRECTORY__, file_name_without_ext, prefix)).native();
+
+			std::vector<block> blocks;
+			std::vector<std::vector<int>> confidences;
+			cv::Size image_size;
+
+			if (category.empty()) {
+				return std::make_tuple(category, blocks, image_size);
+			}
+
+			static const std::unordered_set<std::wstring> NEED_FULL_RECOGNITION{
+				L"BILL OF EXCHANGE", L"CERTIFICATE", L"CERTIFICATE OF ORIGIN", L"LETTER OF CREDIT", L"WAYBILL", L"SHIPMENT ADVICE", L"BILL OF LADING", L"INSURANCE POLICY", L"FIRM OFFER", L"REMITTANCE LETTER",
+			};
+			bool is_trade = true;
+			if (boost::filesystem::exists(recognition_cache_file)) {
+				try {
+					dlib::deserialize(to_cp949(recognition_cache_file)) >> blocks >> image_size.height >> image_size.width;
+					recognition_ticks.stop();
+					spdlog::get("recognizer")->info("recognize document : {} ({:.2f}mSec, cache : true)",
+						to_cp949(file.filename().native()),
+						recognition_ticks.getTimeMilli());
+
+					if (is_trade) {
+						if (NEED_FULL_RECOGNITION.find(category) == NEED_FULL_RECOGNITION.end()) {
+							const auto paper_size = image_size;
+							const auto height = paper_size.height;
+							boost::remove_erase_if(blocks, [&height](const block& block) {
+								const auto top = to_rect(block).y;
+								return (top > height / 3 * 2);
+							});
+						}
+						refine_blocks(blocks, true, true, false, true);
+					}
+					else { // fax
+						refine_blocks(blocks, true, true, false, true);
+					}
+
+				}
+				catch (dlib::serialization_error&) {
+				}
+			}
+
+
+			return std::make_tuple(category, blocks, image_size);
+		}
+
 
 		inline std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>
 			search_fields2(const std::wstring& category, const std::unordered_map<std::wstring, std::vector<std::wstring>>& keywords,
-			const std::vector<block>& blocks)
+				const std::vector<block>& blocks)
 		{
 			std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> searched_fields;
 
@@ -1988,7 +2135,7 @@ namespace selvy {
 
 			std::vector<std::wstring> keys(keywords.size());
 
-			std::transform(keywords.begin(), keywords.end(), keys.begin(), [](const std::pair<std::wstring, std::vector<std::wstring>>& keyword){
+			std::transform(keywords.begin(), keywords.end(), keys.begin(), [](const std::pair<std::wstring, std::vector<std::wstring>>& keyword) {
 				return keyword.first;
 			});
 
@@ -2047,7 +2194,7 @@ namespace selvy {
 
 							if (last_rect != line_rect)
 								searched_fields[field_name].emplace_back(std::make_tuple(line_rect, text,
-								cv::Range(match.get_start(), match.get_end() + 1)));
+									cv::Range(match.get_start(), match.get_end() + 1)));
 						}
 					}
 				}
@@ -2060,7 +2207,7 @@ namespace selvy {
 
 		inline std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>
 			search_fields(const std::wstring& category, const std::unordered_map<std::wstring, std::vector<std::wstring>>& keywords,
-			const std::vector<block>& blocks)
+				const std::vector<block>& blocks)
 		{
 			if (category == L"XIAMETER") {
 				return search_fields2(category, keywords, blocks); // 검출 이슈 키워드('검사방법', '검사결과') 라인 ('검사 방법 검사 결과 단위 .....') '검사결과' 검출 안됨
@@ -2095,14 +2242,14 @@ namespace selvy {
 
 					std::vector<std::wstring> words;
 					if (category == L"Debt Repayment Inquiry") {
-						boost::algorithm::split(words, text, boost::is_any_of(L"\n\t:"), boost::token_compress_on);
+						boost::algorithm::split(words, text, boost::is_any_of(L"\n\t: "), boost::token_compress_on);
 					}
 					else {
 						boost::algorithm::split(words, text, boost::is_any_of(L"\n\t "), boost::token_compress_on);
 					}
 
 					for (auto& word : words) {
-						if (boost::iequals(word, "shipped"))
+						if (boost::iequals(word, "shipped") || boost::iequals(word, "issued"))
 							continue;
 						else if (category == L"DONGSUNG" && (boost::iequals(word, L"제조") || boost::iequals(word, L"제품")))
 							continue;
@@ -2119,17 +2266,20 @@ namespace selvy {
 						text = suggested[0].term;
 
 					if (category == L"Financial Transaction Information Request"
-						|| category == L"Bottom Contact Info page") {
+						|| category == L"Bottom Contact Info Page") {
 						text = boost::regex_replace(text, boost::wregex(L"요구자 기관명"), L"요구기관명");
 						text = boost::regex_replace(text, boost::wregex(L"요구[기|자]{1} 성명"), L"요구기관명");
-						text = boost::regex_replace(text, boost::wregex(L"[문운]{1}서[번민빈인]{1}호"), L"문서번호");
-						text = boost::regex_replace(text, boost::wregex(L"[전진견]{1}(화|하|와||호F|최){1}[^-가-힣A-Za-z0-9 ]{0,2}[번민빈인]{1}호"), L"전화번호");
+						text = boost::regex_replace(text, boost::wregex(L"요구[기|자]{1} 관영"), L"요구기관명");
+						text = boost::regex_replace(text, boost::wregex(L"[문운논]{1}서[번민빈인]{1}호"), L"문서번호");
+						text = boost::regex_replace(text, boost::wregex(L"[전진견]{1}(화|하|와|호F|최){1}[^-가-힣A-Za-z0-9 ]{0,2}[번민빈인]{1}호"), L"전화번호");
 						text = boost::regex_replace(text, boost::wregex(L"Te1"), L"TEL");
-						text = boost::regex_replace(text, boost::wregex(L"[Tt]{1}[.,]{1}"), L"t ");
+						text = boost::regex_replace(text, boost::wregex(L"[Tt]{1}[.,]{1}"), L"t.");
 						text = boost::regex_replace(text, boost::wregex(L"[Ff]{1}[.,]{1}"), L"f.");
 						text = boost::regex_replace(text, boost::wregex(L"[팩백택액]{1}스"), L"팩스");
 						text = boost::regex_replace(text, boost::wregex(L"[EeFfP]{1}[Aa]{1}[Xx]{1}"), L"FAX");
 						text = boost::regex_replace(text, boost::wregex(L"유여!기간"), L"유예기간");
+						text = boost::regex_replace(text, boost::wregex(L"희신문의"), L"회신문의");
+						text = boost::regex_replace(text, boost::wregex(L"[영|잉]{1}장[번민빈인]{1}호"), L"영장번호");
 						if (text.find(L"전화") != std::wstring::npos && text.find(L"연락처") != std::wstring::npos) {
 							text = boost::regex_replace(text, boost::wregex(L"연락처"), L"");
 						}
@@ -2147,7 +2297,7 @@ namespace selvy {
 					else if (category == L"IDCard Of A PO With Contact Info") {
 						text = boost::regex_replace(text, boost::wregex(L"[전진견]{1}[ ]{1}(화|하|학|와|호F|최|호\\.){1}"), L"전화");
 						text = boost::regex_replace(text, boost::wregex(L"Te1"), L"TEL");
-						text = boost::regex_replace(text, boost::wregex(L"[팩백택맥맥]{1}[ ]{1}스"), L"팩스");
+						text = boost::regex_replace(text, boost::wregex(L"[팩백택멕맥]{1}[ ]{1}스"), L"팩스");
 						text = boost::regex_replace(text, boost::wregex(L"사[무|우]{1}[실|설]{1}"), L"사무실");
 					}
 					else if (category == L"Cover Page Top Down Info") {
@@ -2199,7 +2349,52 @@ namespace selvy {
 					else if (category == L"BILL OF LADING") {
 						text = boost::regex_replace(text, boost::wregex(L"HOFC"), L"HDFC");
 					}
+					else if (category == L"INCOME" || category == L"PENSION")
+					{
+						text = boost::regex_replace(text, boost::wregex(L"《"), L"(");
+						text = boost::regex_replace(text, boost::wregex(L"》"), L")");
+						text = boost::regex_replace(text, boost::wregex(L"。"), L".");
+						text = boost::regex_replace(text, boost::wregex(L"사업.{3,4}번[호|5]"), L"사업자등록번호");
+						text = boost::regex_replace(text, boost::wregex(L"기신일"), L"기산일");
+						text = boost::regex_replace(text, boost::wregex(L"계좌.{1,4}긍긍액"), L"계좌입금금액");
+						text = boost::regex_replace(text, boost::wregex(L"계좌010긍그0액"), L"계좌입금금액");
+						text = boost::regex_replace(text, boost::wregex(L"(범|법업)인[명병영][(]?상호[)]?"), L"법인명(상호)");
+						text = boost::regex_replace(text, boost::wregex(L"(법.명|.인명|.법인)[(]?상호[)]?"), L"법인명(상호)");
+						text = boost::regex_replace(text, boost::wregex(L"(...)[(]?상호[)]?"), L"법인명(상호)");
+						text = boost::regex_replace(text, boost::wregex(L"[대내묘][95규표]자[(]?성[명잉양영3][)]?"), L"대표자(성명)");
+						//text = boost::regex_replace(text, boost::wregex(L"내규자[(]?성잉[)]?"), L"대표자(성명)");
+						//text = boost::regex_replace(text, boost::wregex(L"대표자[(]?성[양영][)]?"), L"대표자(성명)");
+						//text = boost::regex_replace(text, boost::wregex(L"대표자[(]?성영[)]?"), L"대표자(성명)");
+						text = boost::regex_replace(text, boost::wregex(L"입사왼"), L"입사일");
+						text = boost::regex_replace(text, boost::wregex(L"[회퇴]사[임일]"), L"퇴사일");
+						text = boost::regex_replace(text, boost::wregex(L"지[급금][입일익]"), L"지급일");
+						text = boost::regex_replace(text, boost::wregex(L"최송근직2？수"), L"최종근속연수");
+						text = boost::regex_replace(text, boost::wregex(L"친총 근속연수"), L"최종근속연수");
+						text = boost::regex_replace(text, boost::wregex(L"친종근숙연수"), L"최종근속연수");
+						text = boost::regex_replace(text, boost::wregex(L"진중 근호면스"), L"최종근속연수");
+						text = boost::regex_replace(text, boost::wregex(L"초!종근속연수"), L"최종근속연수");
+						text = boost::regex_replace(text, boost::wregex(L"경한근속연수"), L"최종근속연수");
+						text = boost::regex_replace(text, boost::wregex(L"(토1|토]|최|틔|린|회)[적직]"), L"퇴직");
+						text = boost::regex_replace(text, boost::wregex(L"(금|급)[어여]"), L"급여");
 
+						//text = boost::regex_replace(text, boost::wregex(L""), L"");
+					}
+					else if (category == L"SMALL")
+					{
+						text = boost::regex_replace(text, boost::wregex(L"¥천자금 지원대상"), L"정책자금 지원대상");
+						text = boost::regex_replace(text, boost::wregex(L"¥천자금 지원대상"), L"정책자금 지원대상");
+						//text = boost::regex_replace(text, boost::wregex(L"광천자금 지원대상"), L"정책자금 지원대상");
+					}
+					else if (category == L"MIDDLE")
+					{
+						text = boost::regex_replace(text, boost::wregex(L"《"), L"(");
+						text = boost::regex_replace(text, boost::wregex(L"》"), L")");
+						text = boost::regex_replace(text, boost::wregex(L"〉"), L")");
+						text = boost::regex_replace(text, boost::wregex(L"〈"), L"(");
+						text = boost::regex_replace(text, boost::wregex(L"업 재명"), L"업체명");
+						text = boost::regex_replace(text, boost::wregex(L"업새영"), L"업체명");
+						text = boost::regex_replace(text, boost::wregex(L"지원에정"), L"지원예정");
+					}
 					auto matches = trie.parse_text(text);
 
 					if (matches.empty()) {
@@ -2218,7 +2413,7 @@ namespace selvy {
 
 						if (last_rect != line_rect)
 							searched_fields[field_name].emplace_back(std::make_tuple(line_rect, text,
-							cv::Range(match.get_start(), match.get_end() + 1)));
+								cv::Range(match.get_start(), match.get_end() + 1)));
 					}
 				}
 			}
@@ -2322,7 +2517,7 @@ namespace selvy {
 
 		inline std::vector<std::pair<cv::Rect, std::wstring>>
 			find_horizontal_lines(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis,
-			const std::vector<std::pair<cv::Rect, std::wstring>>& lines, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, bool expand_both_sides = false)
+				const std::vector<std::pair<cv::Rect, std::wstring>>& lines, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, bool expand_both_sides = false)
 		{
 			auto basis_rect = cv::Rect(std::get<0>(basis));
 			basis_rect.x = 0;
@@ -2431,7 +2626,7 @@ namespace selvy {
 								restict_rect.y = 0;
 								restict_rect.height = std::numeric_limits<int>::max();
 								cv::Rect check = word_rect & restict_rect;
-								if (check.width > collision.width)  {
+								if (check.width > collision.width) {
 									continue;
 								}
 							}
@@ -2507,7 +2702,7 @@ namespace selvy {
 								restict_rect.y = 0;
 								restict_rect.height = std::numeric_limits<int>::max();
 								cv::Rect check = word_rect & restict_rect;
-								if (check.width > collision.width)  {
+								if (check.width > collision.width) {
 									continue;
 								}
 							}
@@ -2642,6 +2837,21 @@ namespace selvy {
 		}
 
 		inline std::vector<std::pair<cv::Rect, std::wstring>>
+			find_nth_right_line(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, const float cutting_ratio = 100.0, bool expand_both_sides = false, int nth = 2)
+		{
+			const auto found_lines = find_right_lines(basis, blocks, hitting_threshold, expanded_ratio, cutting_ratio, expand_both_sides);
+
+			if (found_lines.empty())
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
+			if (found_lines.size() >= nth) {
+				return std::vector<std::pair<cv::Rect, std::wstring>>{found_lines[nth - 1]};
+			}
+			else {
+				return std::vector<std::pair<cv::Rect, std::wstring>>{found_lines[0]};
+			}
+		}
+
+		inline std::vector<std::pair<cv::Rect, std::wstring>>
 			find_left_lines(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, const float cutting_ratio = 100.0, bool expand_both_sides = false)
 		{
 			std::vector<std::pair<cv::Rect, std::wstring>> found_lines;
@@ -2668,6 +2878,7 @@ namespace selvy {
 		}
 
 
+
 		inline std::vector<std::pair<cv::Rect, std::wstring>>
 			find_far_left_line(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, const float cutting_ratio = 100.0, bool expand_both_sides = false)
 		{
@@ -2684,6 +2895,21 @@ namespace selvy {
 			return std::vector<std::pair<cv::Rect, std::wstring>>{found_lines[0]};
 		}
 
+		inline std::vector<std::pair<cv::Rect, std::wstring>>
+			find_far_right_line(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, const float cutting_ratio = 100.0, bool expand_both_sides = false)
+		{
+			auto found_lines = find_right_lines(basis, blocks, hitting_threshold, expanded_ratio, cutting_ratio, expand_both_sides);
+
+			std::sort(std::begin(found_lines), std::end(found_lines),
+				[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+				return std::get<0>(a).x > std::get<0>(b).x;
+			});
+
+			if (found_lines.empty())
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+			return std::vector<std::pair<cv::Rect, std::wstring>>{found_lines[0]};
+		}
 
 		inline std::vector<std::pair<cv::Rect, std::wstring>>
 			find_nearest_left_line(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, const float cutting_ratio = 100.0, bool expand_both_sides = false)
@@ -2694,6 +2920,22 @@ namespace selvy {
 				return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 			return std::vector<std::pair<cv::Rect, std::wstring>>{found_lines[0]};
+		}
+
+		inline std::vector<std::pair<cv::Rect, std::wstring>>
+			find_nth_left_line(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, const float cutting_ratio = 100.0, bool expand_both_sides = false, int nth = 2)
+		{
+			const auto found_lines = find_left_lines(basis, blocks, hitting_threshold, expanded_ratio, cutting_ratio, expand_both_sides);
+
+			if (found_lines.empty())
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+			if (found_lines.size() >= nth) {
+				return std::vector<std::pair<cv::Rect, std::wstring>>{found_lines[nth - 1]};
+			}
+			else {
+				return std::vector<std::pair<cv::Rect, std::wstring>>{found_lines[0]};
+			}
 		}
 
 		inline std::vector<std::pair<cv::Rect, std::wstring>>
@@ -2753,6 +2995,39 @@ namespace selvy {
 		}
 
 		inline std::vector<std::pair<cv::Rect, std::wstring>>
+			find_nth_up_line(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, const float cutting_ratio = 100.0, bool expand_both_sides = false, int nth = 2)
+		{
+			std::vector<std::pair<cv::Rect, std::wstring>> found_lines;
+
+			const auto vertical_lines = find_vertical_lines(basis, blocks, hitting_threshold, expanded_ratio, expand_both_sides);
+			const auto basis_rect = to_rect(basis);
+
+			for (const auto& line : vertical_lines) {
+				const auto line_rect = std::get<0>(line);
+				const auto basis_center_y = basis_rect.y + basis_rect.height / 2;
+				if (basis_center_y > line_rect.y)
+					found_lines.emplace_back(line);
+			}
+
+			boost::remove_erase_if(found_lines, [&basis, &cutting_ratio](const std::pair<cv::Rect, std::wstring>& block) {
+				const auto cut = to_rect(basis).y - to_rect(basis).height * cutting_ratio;
+				return to_rect(block).y < cut;
+			});
+
+			std::sort(std::begin(found_lines), std::end(found_lines),
+				[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+				return std::get<0>(a).y > std::get<0>(b).y;
+			});
+
+			if (found_lines.size() >= nth)
+			{
+				return{ found_lines[nth - 1] };
+			}
+
+			return found_lines;
+		}
+
+		inline std::vector<std::pair<cv::Rect, std::wstring>>
 			find_nearest_up_words(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, const float cutting_ratio = 100.0, bool multi_line = false, bool merge = false, bool expand_both_sides = false)
 		{
 			auto found_lines = find_up_words(basis, blocks, hitting_threshold, expanded_ratio, cutting_ratio, expand_both_sides);
@@ -2805,7 +3080,7 @@ namespace selvy {
 				return std::vector<std::pair<cv::Rect, std::wstring>>{found_lines[0]};
 
 			std::vector<std::pair<cv::Rect, std::wstring>> found_above_lines;
-			for (int i = 0; i < found_lines.size(); i++) {
+			for (int i = 0; i < found_lines.size() - 1; i++) {
 				if (i == 0) {
 					if (to_wstring(found_lines[i]).size() > 1)
 						found_above_lines.emplace_back(found_lines[i]);
@@ -2860,6 +3135,40 @@ namespace selvy {
 			});
 
 			return found_lines;
+		}
+
+		inline std::vector<std::pair<cv::Rect, std::wstring>>
+			find_nth_down_line(const std::tuple < cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks, const float hitting_threshold = 0.5, const float expanded_ratio = 0.0, const float cutting_ratio = 100.0, bool expand_both_sides = false, int nth = 2)
+		{
+			std::vector<std::pair<cv::Rect, std::wstring>> found_lines;
+
+			const auto vertical_lines = find_vertical_lines(basis, blocks, hitting_threshold, expanded_ratio, expand_both_sides);
+			const auto basis_rect = to_rect(basis);
+
+			for (const auto& line : vertical_lines) {
+				const auto line_rect = std::get<0>(line);
+				const auto basis_center_y = basis_rect.y + basis_rect.height / 2;
+				if (basis_center_y < line_rect.y)
+					found_lines.emplace_back(line);
+			}
+
+			boost::remove_erase_if(found_lines, [&basis, &cutting_ratio](const std::pair<cv::Rect, std::wstring>& block) {
+				const auto cut = to_rect(basis).br().y + to_rect(basis).height * cutting_ratio;
+				return to_rect(block).y > cut;
+			});
+
+			std::sort(std::begin(found_lines), std::end(found_lines),
+				[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+				return std::get<0>(a).y < std::get<0>(b).y;
+			});
+
+			if (found_lines.size() >= nth)
+			{
+				return{ found_lines[nth - 1] };
+			}
+			else {
+				return found_lines;
+			}
 		}
 
 		inline std::vector<std::pair<cv::Rect, std::wstring>>
@@ -3049,8 +3358,6 @@ namespace selvy {
 				return std::vector<std::pair<cv::Rect, std::wstring>>{found_lines[0]};
 
 			std::vector<std::pair<cv::Rect, std::wstring>> found_below_lines;
-
-
 			for (int i = 0; i < found_lines.size(); i++) {
 				if (i == 0) {
 					if (to_wstring(found_lines[i]).size() > 1)
@@ -3104,6 +3411,15 @@ namespace selvy {
 			return std::vector<std::pair<cv::Rect, std::wstring>>{
 				std::make_pair(std::get<0>(basis),
 					std::wstring(std::get<1>(basis).begin() + std::get<2>(basis).end, std::get<1>(basis).end()))
+			};
+		}
+
+		inline std::vector<std::pair<cv::Rect, std::wstring>>
+			search_self_left(const std::tuple<cv::Rect, std::wstring, cv::Range>& basis, const std::vector<block>& blocks)
+		{
+			return std::vector<std::pair<cv::Rect, std::wstring>>{
+				std::make_pair(std::get<0>(basis),
+					std::wstring(std::get<1>(basis).begin(), std::get<1>(basis).end() - std::get<2>(basis).end + std::get<2>(basis).start + 1))
 			};
 		}
 
@@ -3226,21 +3542,23 @@ namespace selvy {
 		{
 			return boost::algorithm::trim_copy(boost::to_upper_copy(a));
 		}
-		
+
 		inline std::pair<cv::Rect, std::wstring>
 			preprocess_port_of_discharge(const std::pair<cv::Rect, std::wstring>& a)
 			//preprocess_port_of_discharge(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category)
 		{
 			auto text = boost::to_upper_copy(std::get<1>(a));
-			text = boost::regex_replace(text, boost::wregex(L"[><,]"), L"");
+			//text = boost::regex_replace(text, boost::wregex(L"[><,]"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z0-9\\.,() ]"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(HQCHIMINH|HOCH IM INH)"), L"HOCHIMINH");
 			text = boost::regex_replace(text, boost::wregex(L"VI FT NAM"), L"VIETNAM");
-			text = boost::regex_replace(text, boost::wregex(L"(AU UAE)"), L"ALI UAE");
+			text = boost::regex_replace(text, boost::wregex(L"(JEBEL AU)"), L"JEBEL ALI");
 			text = boost::regex_replace(text, boost::wregex(L"ADELA1 DE"), L"ADELAIDE");
 			text = boost::regex_replace(text, boost::wregex(L"AUSTRAL 1A"), L"AUSTRALIA");
 			text = boost::regex_replace(text, boost::wregex(L"PORI"), L"PORT");
 			text = boost::regex_replace(text, boost::wregex(L"CHAUOGRAM"), L"CHATTOGRAM ");
 			text = boost::regex_replace(text, boost::wregex(L"EGY1"), L"EGYPT");
+			text = boost::regex_replace(text, boost::wregex(L"MANZANILLCKMX"), L"MANZANILLO(MX");
 
 			text = boost::regex_replace(text, boost::wregex(L"(.*)(SFAX) "), L"SFAX ");
 			text = boost::regex_replace(text, boost::wregex(L"(OR THE)(.*)"), L"");
@@ -3256,8 +3574,8 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"(ACCEPTING)(.*)"), L"");
 
 			text = boost::replace_all_copy(text, L"»*", L"**");
-			text = boost::replace_all_copy(text, L"*»", L"**");			
-			
+			text = boost::replace_all_copy(text, L"*»", L"**");
+
 			//text = boost::regex_replace(text, boost::wregex(L"/?FLIGHT to:?", boost::regex::icase), L"");
 			std::vector<std::wstring> words;
 			boost::algorithm::split(words, text, boost::is_any_of(L"., "), boost::token_compress_on);
@@ -3265,9 +3583,9 @@ namespace selvy {
 			auto nCnt = 0;
 			if (words.size() > 1) {
 				for (auto i = 1; i < words.size(); i++) {
-					if (words[0] == words[i]) 
+					if (words[0] == words[i])
 						break;
-					else 
+					else
 						nCnt++;
 				}
 
@@ -3283,7 +3601,7 @@ namespace selvy {
 
 			return std::make_pair(std::get<0>(a), strBuf);
 		}
-		
+
 		inline std::pair<cv::Rect, std::wstring>
 			preprocess_bank_name(const std::pair<cv::Rect, std::wstring>& a)
 		{
@@ -3338,7 +3656,7 @@ namespace selvy {
 			preprocess_notify(const std::pair<cv::Rect, std::wstring>& a)
 		{
 			auto text = boost::to_upper_copy(std::get<1>(a));
-			
+
 			text = boost::regex_replace(text, boost::wregex(L"N1AZI"), L"NIAZI");
 			text = boost::regex_replace(text, boost::wregex(L"KDIL"), L"KOIL");
 			text = boost::regex_replace(text, boost::wregex(L"2-UKM"), L"2-CHOME");
@@ -3354,11 +3672,12 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"[(]{1}DLUEN"), L"(1)LUEN");
 			text = boost::regex_replace(text, boost::wregex(L"ABDELMOVMEN, QUARTIER DES HQPITAUX"), L"ABDELMOUMEN, QUARTIER DES HOPITAUX");
 			text = boost::regex_replace(text, boost::wregex(L"PUBUC COMPANY UNITED"), L"PUBLIC COMPANY LIMITED");
+			text = boost::regex_replace(text, boost::wregex(L"PUBUC COMPANY"), L"PUBLIC COMPANY");
 			text = boost::regex_replace(text, boost::wregex(L"PHASE ([1I]{1}[8B]{1})"), L"PHASE 1B");
-			text = boost::regex_replace(text, boost::wregex(L"(BOULEVAR[DO]{1}E) P 0 BOX"), L"BOULEVARDE P O BOX");			
+			text = boost::regex_replace(text, boost::wregex(L"(BOULEVAR[DO]{1}E) P 0 BOX"), L"BOULEVARDE P O BOX");
 			text = boost::regex_replace(text, boost::wregex(L"(FOR)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(TEL)(.*)"), L"");
-			text = boost::regex_replace(text, boost::wregex(L"(TAX ID)(.*)"), L"");
+			//text = boost::regex_replace(text, boost::wregex(L"(TAX ID)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(ATTN)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(PHONE)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(/ PRE)(.*)"), L"");
@@ -3380,7 +3699,7 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"(.*)(ULSAN)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(.*)(HEE 309)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(.*)(MINH 6)"), L"");
-			
+
 
 			text = boost::regex_replace(text, boost::wregex(L"(HQCHIMINH|HOCH IM INH)"), L"HOCHIMINH");
 			text = boost::regex_replace(text, boost::wregex(L"(KAORICRIUNTRY)"), L"KAOHSIUNG");
@@ -3392,20 +3711,22 @@ namespace selvy {
 			text = boost::regex_replace(text, boost::wregex(L"PORI"), L"PORT");
 			text = boost::regex_replace(text, boost::wregex(L"CHAUOGRAM"), L"CHATTOGRAM ");
 			text = boost::regex_replace(text, boost::wregex(L"EGY1"), L"EGYPT");
+			text = boost::regex_replace(text, boost::wregex(L"5USAN"), L"BUSAN");
 			text = boost::regex_replace(text, boost::wregex(L"KOREZ"), L"KOREA");
 
 			text = boost::regex_replace(text, boost::wregex(L"([OIAT]{1}[ROT]{1} THE)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(SFAX )(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(THIS)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(NUMBER)(.*)"), L"");
-			text = boost::regex_replace(text, boost::wregex(L"(DELIVERED)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(DELIVERED|DELIVERY)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(HEREIN)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(FORWARDING)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(MARKS)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(SHOWN)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(ACCEPTING)(.*)"), L"");
 			text = boost::regex_replace(text, boost::wregex(L"(MORE OR)(.*)"), L"");
-			text = boost::regex_replace(text, boost::wregex(L"(APPLICABLE)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(APPLICABLE)(.*)"), L"");
+			text = boost::regex_replace(text, boost::wregex(L"(.*)(DELIVERY)(.*)"), L"");
 
 			std::vector<std::wstring> words;
 			boost::algorithm::split(words, text, boost::is_any_of(L"., "), boost::token_compress_on);
@@ -3441,14 +3762,47 @@ namespace selvy {
 			return boost::algorithm::trim_copy(boost::to_upper_copy(a));
 		}
 
+		//inline std::wstring
+		//	postprocess_digit(const std::wstring& a)
+		//{
+		//	//£
+		//	auto digit = boost::regex_replace(a, boost::wregex(L"[^0-9]"), L"");
+		//	std::wstring text = boost::regex_replace(a, boost::wregex(L"£"), L"14");;
+		//	if (a.find(L" EA") != -1)
+		//	{
+		//		text = text.substr(text.find(L" EA")+3);
+		//	}
+		//	if (a.find(L"KG") != -1)
+		//	{
+		//		text = text.substr(text.find(L"KG") + 2);
+		//	}if (a.find(L"MT") != -1)
+		//	{
+		//		text = text.substr(text.find(L"MT") + 2);
+		//	}
+		//	auto only_char = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z]", boost::regex::icase), L"");
+		//	text = boost::regex_replace(text, boost::wregex(L"(TOTAL|PRICE|AMOUNT|USD|CAD|EUR)", boost::regex::icase), L"");
+		//	if (digit.length() < 5 || only_char.length() > digit.length())
+		//		return L"";
+		//	
+		//	return boost::algorithm::trim_copy(boost::to_upper_copy(text));
+		//}
+		inline std::wstring
+			postprocess_uppercase_for_ci(const std::wstring& a)
+		{
+
+			auto text = boost::regex_replace(a, boost::wregex(L"GLOVIS AASS", boost::regex::icase), L"GLOVIS AS");
+			text = boost::regex_replace(text, boost::wregex(L"CONSIGNEE.*", boost::regex::icase), L"");
+			text = boost::regex_replace(text, boost::wregex(L"SEOCHO-GKT", boost::regex::icase), L"SEOCHO-GU");
+			return boost::algorithm::trim_copy(boost::to_upper_copy(text));
+		}
 
 		inline std::vector<std::pair<cv::Rect, std::wstring>>
 			extract_field_values(const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& fields, const std::vector<block>& blocks,
-			const std::function < std::vector<std::pair<cv::Rect, std::wstring>>(
-			const std::tuple<cv::Rect, std::wstring, cv::Range>&, const std::vector<block>&)>& search,
-			const std::function<std::pair<cv::Rect, std::wstring>(const std::pair<cv::Rect, std::wstring>&)>& preprocess,
-			const std::function<std::wstring(const std::pair<cv::Rect, std::wstring>&)>& extract,
-			const std::function<std::wstring(const std::wstring&)>& postprocess)
+				const std::function < std::vector<std::pair<cv::Rect, std::wstring>>(
+					const std::tuple<cv::Rect, std::wstring, cv::Range>&, const std::vector<block>&)>& search,
+				const std::function<std::pair<cv::Rect, std::wstring>(const std::pair<cv::Rect, std::wstring>&)>& preprocess,
+				const std::function<std::wstring(const std::pair<cv::Rect, std::wstring>&)>& extract,
+				const std::function<std::wstring(const std::wstring&)>& postprocess)
 		{
 			std::vector<std::pair<cv::Rect, std::wstring>> extracted_values;
 
@@ -3469,6 +3823,44 @@ namespace selvy {
 			return extracted_values;
 		}
 
+
+		inline std::vector<std::pair<cv::Rect, std::wstring>>
+			extract_field_values_2(const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& fields, const std::vector<block>& blocks,
+				const std::vector<std::function <bool(const std::tuple<cv::Rect, std::wstring, cv::Range>&, const std::vector<block>&)>>& filter_fields,
+				const std::function < std::vector<std::pair<cv::Rect, std::wstring>>(
+					const std::tuple<cv::Rect, std::wstring, cv::Range>&, const std::vector<block>&)>& search,
+				const std::function<std::pair<cv::Rect, std::wstring>(const std::pair<cv::Rect, std::wstring>&)>& preprocess,
+				const std::function<std::wstring(const std::pair<cv::Rect, std::wstring>&)>& extract,
+				const std::function<std::wstring(const std::wstring&)>& postprocess)
+		{
+			std::vector<std::pair<cv::Rect, std::wstring>> extracted_values;
+
+			for (const auto& field : fields) {
+				bool flag = false;
+				for (const auto filter_field : filter_fields) {
+					if (filter_field(field, blocks)) {
+						flag = true;
+					}
+				}
+				if (flag) {
+					continue;
+				}
+
+				const auto found_blocks = search(field, blocks);
+
+				for (const auto& line : found_blocks) {
+					const auto preprocessed = preprocess(line);
+					const auto extracted = extract(preprocessed);
+					const auto postprocessed = postprocess(extracted);
+
+					if (!postprocessed.empty()) {
+						extracted_values.emplace_back(std::make_pair(std::get<0>(line), postprocessed));
+					}
+				}
+			}
+
+			return extracted_values;
+		}
 		inline std::vector<std::pair<cv::Rect, std::wstring>>
 			extract_field_values2(const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& fields, const std::vector<block>& blocks,
 				const std::function < std::vector<std::pair<cv::Rect, std::wstring>>(
@@ -3511,45 +3903,6 @@ namespace selvy {
 
 			return extracted_values;
 		}
-
-		inline std::vector<std::pair<cv::Rect, std::wstring>>
-			extract_field_values_2(const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& fields, const std::vector<block>& blocks,
-			const std::vector<std::function <bool(const std::tuple<cv::Rect, std::wstring, cv::Range>&, const std::vector<block>&)>>& filter_fields,
-			const std::function < std::vector<std::pair<cv::Rect, std::wstring>>(
-			const std::tuple<cv::Rect, std::wstring, cv::Range>&, const std::vector<block>&)>& search,
-			const std::function<std::pair<cv::Rect, std::wstring>(const std::pair<cv::Rect, std::wstring>&)>& preprocess,
-			const std::function<std::wstring(const std::pair<cv::Rect, std::wstring>&)>& extract,
-			const std::function<std::wstring(const std::wstring&)>& postprocess)
-		{
-			std::vector<std::pair<cv::Rect, std::wstring>> extracted_values;
-
-			for (const auto& field : fields) {
-				bool flag = false;
-				for (const auto filter_field : filter_fields) {
-					if (filter_field(field, blocks)) {
-						flag = true;
-					}
-				}
-				if (flag) {
-					continue;
-				}
-
-				const auto found_blocks = search(field, blocks);
-
-				for (const auto& line : found_blocks) {
-					const auto preprocessed = preprocess(line);
-					const auto extracted = extract(preprocessed);
-					const auto postprocessed = postprocess(extracted);
-
-					if (!postprocessed.empty()) {
-						extracted_values.emplace_back(std::make_pair(std::get<0>(line), postprocessed));
-					}
-				}
-			}
-
-			return extracted_values;
-		}
-
 		inline std::function<std::wstring(const std::wstring&)>
 			create_postprocess_function(const configuration& configuration, const std::wstring& mapper)
 		{
@@ -3575,7 +3928,7 @@ namespace selvy {
 
 		inline std::function<std::wstring(const std::pair<cv::Rect, std::wstring>&)>
 			create_extract_ori_function(const configuration& configuration, const std::wstring& dictionary_category,
-			int edit_distance = 1)
+				int edit_distance = 1)
 		{
 			return [&, edit_distance](const std::pair<cv::Rect, std::wstring>& line) -> std::wstring {
 				const auto dictionary = get_dictionary_words(configuration, dictionaries_, dictionary_category);
@@ -3620,7 +3973,7 @@ namespace selvy {
 
 		inline std::function<std::wstring(const std::pair<cv::Rect, std::wstring>&)>
 			create_extract_function(const configuration& configuration, const std::wstring& dictionary_category,
-			int edit_distance = 1)
+				int edit_distance = 1)
 		{
 			return [&, edit_distance](const std::pair<cv::Rect, std::wstring>& line) -> std::wstring {
 				const auto dictionary = get_dictionary_words(configuration, dictionaries_, dictionary_category);
@@ -3635,23 +3988,26 @@ namespace selvy {
 				boost::algorithm::split(words, text, boost::is_any_of(L"\t "), boost::token_compress_on);
 
 				for (auto& word : words) {
+					const auto threshold = get_distance_threshold(word);
 					const auto suggested = spell_dictionary->Correct(word);
-					if (!suggested.empty() && suggested[0].distance <= edit_distance)
+					if (!suggested.empty() && suggested[0].distance <= std::min(edit_distance, threshold))
 						word = suggested[0].term;
 				}
 
 				text = boost::algorithm::join(words, L" ");
 
 				auto suggested = spell_dictionary->Correct(text);
-				if (!suggested.empty() && suggested[0].distance <= edit_distance)
+				const auto threshold = get_distance_threshold(text);
+				if (!suggested.empty() && suggested[0].distance <= std::min(edit_distance, threshold))
 					text = suggested[0].term;
 
 				auto matches = trie.parse_text(text);
 
 				if (matches.empty()) {
 					boost::erase_all(text, L" ");
+					const auto threshold = get_distance_threshold(text);
 					const auto suggested = spell_dictionary->Correct(text);
-					if (!suggested.empty() && suggested[0].distance <= edit_distance)
+					if (!suggested.empty() && suggested[0].distance <= std::min(edit_distance, threshold))
 						text = suggested[0].term;
 					matches = trie.parse_text(text);
 				}
@@ -3711,30 +4067,7 @@ namespace selvy {
 			};
 		}
 
-		inline std::function<std::wstring(const std::pair<cv::Rect, std::wstring>&)>
-			create_extract_sender(const std::wstring& regex)
-		{
-			return [&](const std::pair<cv::Rect, std::wstring>& line) -> std::wstring {
-				boost::wregex re(regex, boost::regex_constants::icase);
-				boost::match_results<std::wstring::const_iterator> matches;
-				const auto text = std::get<1>(line);
 
-				//text = std::to_wstring(boost::replace_all_copy(text, L"SWIFT MT SENDER", L""));
-
-				if (boost::regex_search(std::begin(text), std::end(text), matches, re)) {
-					if (!matches.empty()) {
-						for (auto i = 1; i < matches.size(); i++) {
-							const auto matched = std::wstring(matches[i].first, matches[i].second);
-							
-							if (!matched.empty())
-								return matched;
-						}
-					}
-				}
-
-				return L"";
-			};
-		}
 
 		inline std::function<std::wstring(const std::pair<cv::Rect, std::wstring>&)>
 			create_coa_extract_function(const std::wstring& regex)
@@ -3769,13 +4102,18 @@ namespace selvy {
 				throw std::logic_error("not implmented");
 			}
 			std::pair<std::wstring, int>
-				recognize(const std::string& buffer, const std::wstring& type, const std::string& secret) override
+				recognize(const std::string& buffer, const std::wstring& type, const std::string& secret = "") override
 			{
 				throw std::logic_error("not implmented");
 			}
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
-				recognize(const boost::filesystem::path& path,
-				const std::wstring& class_name) override
+				recognize(const boost::filesystem::path& path, const std::wstring& class_name = L"") override
+			{
+				throw std::logic_error("not implmented");
+			}
+
+			std::pair<std::unordered_map<std::wstring, std::wstring>, std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>>
+				recognize(const boost::filesystem::path& path, const std::string& secret, const int ignore) override
 			{
 				const auto configuration = load_configuration(L"fax");
 
@@ -3808,7 +4146,7 @@ namespace selvy {
 					const auto extension = boost::algorithm::to_lower_copy(path.extension().native());
 
 					if (extension != L".png" && extension != L".jpg" && extension != L".tif" && extension != L".jp2")
-						return std::unordered_map<std::wstring, std::vector<std::wstring>>();
+						return std::make_pair(std::unordered_map<std::wstring, std::wstring>(), std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>());
 
 					files.emplace_back(boost::filesystem::absolute(path).native());
 				}
@@ -3848,38 +4186,45 @@ namespace selvy {
 				bool is_dri_set = false;
 				const bool use_cache = __USE_CACHE__;
 				try {
-					//cv::parallel_for_(cv::Range(0, files.size()), [&](const cv::Range& range) {
+					auto thread_count = std::stoi(configuration.at(L"engine").at(L"concurrency"));
+					const auto total = files.size();
+
+					dlib::parallel_for_blocked(thread_count, 0, total, [&](const long start, const long end) {
+#ifndef __NO_FINEREADER__
 						CComPtr<FREngine::IEngineLoader> loader;
 						FREngine::IEnginePtr engine;
-						std::tie(loader, engine) = get_engine_object(configuration);
+						std::tie(loader, engine) = get_engine_object(configuration, false);
 
-						//auto classification_engine = engine->CreateClassificationEngine();
-						//auto classification_model = classification_engine->
-							//CreateModelFromFile(get_classification_model(configuration).c_str());
+						auto classification_engine = engine->CreateClassificationEngine();
+						auto classification_model = classification_engine->
+							CreateModelFromFile(get_classification_model(configuration).c_str());
+#endif
 
-						//for (auto i = range.start; i < range.end; i++) {
-						for (auto i = 0; i < files.size(); i++) {
-							memory_reader memory_reader(boost::filesystem::absolute(files[i]), "");
+						for (auto i = start; i < end; i++) {
+							memory_reader memory_reader(boost::filesystem::absolute(files[i]), secret);
 
 							if (is_document_filtered(memory_reader.decrypted_)) {
 								continue;
 							}
 
-							FREngine::IFRDocumentPtr document;
-							if (!use_cache) {
-								document = engine->CreateFRDocument();
-								document->AddImageFileFromStream(&memory_reader, nullptr, nullptr, nullptr, boost::filesystem::path(files[i]).filename().native().c_str());
-								auto page_preprocessing_params = engine->CreatePagePreprocessingParams();
-								page_preprocessing_params->CorrectOrientation = VARIANT_TRUE;
-								page_preprocessing_params->OrientationDetectionParams->put_OrientationDetectionMode(FREngine::OrientationDetectionModeEnum::ODM_Thorough);
-								document->Preprocess(page_preprocessing_params, nullptr, nullptr, nullptr);
+							std::wstring class_name;
+							std::vector<block> blocks;
+							cv::Size image_size;
+							double confidence = 0.;
+							auto file_name = boost::filesystem::path(files[i]).filename().native();
+#ifndef __NO_FINEREADER__
+							auto document = engine->CreateFRDocument();
+							document->AddImageFileFromStream(&memory_reader, nullptr, nullptr, nullptr,
+								boost::filesystem::path(files[i]).filename().native().c_str());
+							auto page_preprocessing_params = engine->CreatePagePreprocessingParams();
+							page_preprocessing_params->CorrectOrientation = VARIANT_TRUE;
+							page_preprocessing_params->OrientationDetectionParams->put_OrientationDetectionMode(FREngine::OrientationDetectionModeEnum::ODM_Thorough);
+							document->Preprocess(page_preprocessing_params, nullptr, nullptr, nullptr);
 
-								if (document->Pages->Count < 1) {
-									document->Close();
-									continue;
-								}
+							if (document->Pages->Count < 1) {
+								document->Close();
+								continue;
 							}
-
 #ifdef LOG_USE_WOFSTREAM
 							txt_file << L"-----------------------------------------------------" << std::endl;
 							txt_file << L"File : " << files[i] << std::endl;
@@ -3892,7 +4237,11 @@ namespace selvy {
 								}
 								continue;
 							}
-
+#else
+							std::tie(class_name, blocks, image_size) = read_cache(files[i]);
+							if (class_name.empty() || blocks.empty())
+								continue;
+#endif
 							const std::set<std::wstring> processed_class_names{
 								L"Agreement Cover Page",
 								L"Financial Transaction Information Request",
@@ -3911,9 +4260,9 @@ namespace selvy {
 
 							// 인식할 필요가 없는 문서는 pass
 							if (processed_class_names.find(class_name) == processed_class_names.end()) {
-								if (!use_cache) {
-									document->Close();
-								}
+#ifndef __NO_FINEREADER__
+								document->Close();
+#endif
 								continue;
 							}
 
@@ -3921,34 +4270,39 @@ namespace selvy {
 							if (class_name == L"Agreement Cover Page") {
 								has_agreement = true;
 
-								if (!use_cache) {
-									document->Close();
-								}
+#ifndef __NO_FINEREADER__
+								document->Close();
+#endif
 								continue;
 							}
 
 							if (class_name == L"Certificate Of Trial") {
 								has_trial_cert = true;
 
-								if (!use_cache) {
-									document->Close();
-								}
+#ifndef __NO_FINEREADER__
+								document->Close();
+#endif
 								continue;
 							}
 
 							if (class_name == L"Debt Repayment Inquiry")
 								is_dri_set = true;
 
-							std::vector<block> blocks;
-							cv::Size image_size;
+							// std::vector<block> blocks;
+							// cv::Size image_size;
+
+#ifndef __NO_FINEREADER__
 							std::tie(blocks, std::ignore, image_size) = recognize_document(engine, configuration, class_name, files[i], document);
 							if (image_size.area() == 0)
 								image_size = estimate_paper_size(blocks);
 
-							if (!use_cache) {
-								document->Close();
+#else
+							if (processed_class_names.find(class_name) == processed_class_names.end()) {
+								continue;
 							}
+#endif
 
+							const auto text = to_wstring(blocks);
 							const auto keywords = get_keywords(configuration, keywords_, class_name);
 							const auto searched_fields = search_fields(class_name, keywords, blocks);
 
@@ -3956,7 +4310,12 @@ namespace selvy {
 
 							if (class_name == L"Financial Transaction Information Request") {
 								const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
-								const auto document_number = extract_document_number(class_name, searched_fields, blocks, image_size);
+								auto document_number = extract_document_number(class_name, searched_fields, blocks, image_size);
+#ifndef __NO_FINEREADER__
+								if (document_number.empty()) {
+									document_number = extract_document_number_using_region(engine, document, configuration, class_name, searched_fields, blocks);
+								}
+#endif
 								const auto grace_period = extract_grace_period(class_name, searched_fields, blocks, image_size);
 								const auto warrant_number_value = extract_warrant_number(class_name, searched_fields, blocks, image_size);
 								const auto warrant_number = std::get<1>(warrant_number_value);
@@ -3964,7 +4323,7 @@ namespace selvy {
 								const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, request_organ);
 								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
 								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
-								auto manager_position_value = extract_manager_position(configuration, class_name, searched_fields, blocks, image_size, request_organ);;
+								auto manager_position_value = extract_manager_position(configuration, class_name, searched_fields, blocks, image_size, request_organ);
 								auto manager_position = std::get<1>(manager_position_value);
 								const auto executive_name_value = extract_executive_name(class_name, searched_fields, blocks, image_size, request_organ);
 								auto executive_name = std::get<1>(executive_name_value);
@@ -4074,13 +4433,46 @@ namespace selvy {
 								fill_field(extracted_fields, L"FAX_NO", fax_number);
 								fill_field(extracted_fields, L"EMAIL_ID", email_address);
 							}
+							else if (class_name == L"Cover Page Tax Service Fax") {
+								const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
+								const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
+								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
+								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
+								const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, std::make_pair(cv::Rect(), L""), std::make_pair(cv::Rect(), L""), image_size, request_organ);
 
+								fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
+								fill_field(extracted_fields, L"TELNO", telephone_number);
+								fill_field(extracted_fields, L"FAX_NO", fax_number);
+								fill_field(extracted_fields, L"EMAIL_ID", email_address);
+								fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
+							}
+							else if (class_name == L"Cover Page Tax Service Logo") {
+								const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
+								const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
+								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
+								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
+
+								fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
+								fill_field(extracted_fields, L"TELNO", telephone_number);
+								fill_field(extracted_fields, L"FAX_NO", fax_number);
+								fill_field(extracted_fields, L"EMAIL_ID", email_address);
+							}
+							else if (class_name == L"Cover Page Police Agency Logo") {
+								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, L"", image_size);
+								const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, std::make_pair(cv::Rect(), L""), std::make_pair(cv::Rect(), L""), image_size, L"");
+
+								fill_field(extracted_fields, L"FAX_NO", fax_number);
+								fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
+							}
+#ifndef __NO_FINEREADER__
+							document->Close();
+#endif
 #if defined(_DEBUG)
 							const auto image = debug_;
 #endif
 
-#ifdef LOG_USE_WOFSTREAM            // 문서단위 결과
-							const auto text = to_wstring(blocks);
+#ifdef LOG_USE_WOFSTREAM    // 문서단위 결과
+							// const auto text = to_wstring(blocks);
 							txt_file << L"ALL : " << std::endl;
 							txt_file << text << std::endl << std::endl;
 
@@ -4110,17 +4502,19 @@ namespace selvy {
 							fields.at(class_name).emplace_back(extracted_fields);
 						}
 
-						release_engine_object(std::make_pair(loader, engine));
-					//}, std::stoi(configuration.at(L"engine").at(L"concurrency")));
+#ifndef __NO_FINEREADER__
+						release_engine_object(std::make_pair(loader, engine), false);
+#endif
+					}, 1);
 				}
 				catch (_com_error& e) {
-					spdlog::get("recognizer")->error("exception : {} : ({} : {})", to_cp949(e.Description().GetBSTR()), __FILE__, __LINE__);
+					spdlog::get("recognizer")->error("exception : {} ({} : {})", to_cp949(e.Description().GetBSTR()), __FILE__, __LINE__);
 				}
 
 				const std::unordered_map<std::wstring, std::wstring> db_default_value = {
 					{ L"DEMAND_INSTI", DEFAULT_FAX_COLUMN_VALUE_FOR_STRING },
 					{ L"INFO_REQ_INSTI_MK", DEFAULT_FAX_COLUMN_VALUE_FOR_CODE },
-					{ L"DLV_AMT_MK", DEFAULT_FAX_COLUMN_VALUE_FOR_STRING },
+					{ L"DLV_AMT_MK", DEFAULT_FAX_COLUMN_VALUE_FOR_CODE },
 					{ L"DOC_NO", DEFAULT_FAX_COLUMN_VALUE_FOR_STRING },
 					{ L"WARRNT_DOC_NO", DEFAULT_FAX_COLUMN_VALUE_FOR_STRING },
 					{ L"DMND_INCHRG_TLE", DEFAULT_FAX_COLUMN_VALUE_FOR_STRING },
@@ -4143,28 +4537,28 @@ namespace selvy {
 				};
 
 				std::unordered_map<std::wstring, std::vector<std::wstring>> db_fields = {
-					{ L"DEMAND_INSTI", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"INFO_REQ_INSTI_MK", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"DLV_AMT_MK", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"DOC_NO", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"WARRNT_DOC_NO", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"DMND_INCHRG_TLE", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"DMND_INCHRG_NM", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"DMND_CHRGP_NM", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"TELNO", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"FAX_NO", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"LEGAL_BASE_MK", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"USE_OBJCTV_CD", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"NOTICE_DTRRD_PRD", { DEFAULT_FAX_COLUMN_VALUE_FOR_PRD } },
-					{ L"NOTICE_DTRRD_RSN", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"CRIME_NM", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"EMAIL_ID", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"DOC_TYPE", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"OTHER1", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
-					{ L"OTHER2", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
-					{ L"OTHER3", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
-					{ L"OTHER4", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
-					{ L"OTHER5", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"DEMAND_INSTI",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"INFO_REQ_INSTI_MK",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"DLV_AMT_MK",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"DOC_NO",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"WARRNT_DOC_NO",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"DMND_INCHRG_TLE",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"DMND_INCHRG_NM",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"DMND_CHRGP_NM",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"TELNO",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"FAX_NO",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"LEGAL_BASE_MK",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"USE_OBJCTV_CD",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"NOTICE_DTRRD_PRD",{ DEFAULT_FAX_COLUMN_VALUE_FOR_PRD } },
+					{ L"NOTICE_DTRRD_RSN",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"CRIME_NM",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"EMAIL_ID",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"DOC_TYPE",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"OTHER1",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"OTHER2",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"OTHER3",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"OTHER4",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"OTHER5",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
 				};
 
 				const std::vector<std::wstring> ordered_categories = {
@@ -4324,7 +4718,8 @@ namespace selvy {
 					db_fields.at(L"DOC_TYPE")[0] = DEFAULT_FAX_COLUMN_VALUE_FOR_CODE;
 				}
 				else if (request_organ.find(L"보훈청") != std::wstring::npos || request_organ.find(L"보훈지청") != std::wstring::npos
-					|| request_organ.find(L"병무청") != std::wstring::npos || request_organ.find(L"병무지청") != std::wstring::npos) {
+					|| request_organ.find(L"병무청") != std::wstring::npos || request_organ.find(L"병무지청") != std::wstring::npos
+					|| request_organ.find(L"비행단") != std::wstring::npos) {
 					if (!has_agreement) {// ???
 						db_fields.at(L"INFO_REQ_INSTI_MK")[0] = L"03";
 						db_fields.at(L"DLV_AMT_MK")[0] = L"05";
@@ -4388,7 +4783,7 @@ namespace selvy {
 					db_fields.at(L"DOC_TYPE")[0] = L"1";
 
 					if (db_fields.at(L"DMND_CHRGP_NM")[0] == DEFAULT_FAX_COLUMN_VALUE_FOR_STRING)
-						db_fields.at(L"DMND_CHRGP_NM")[0] == db_fields.at(L"DMND_INCHRG_NM")[0];
+						db_fields.at(L"DMND_CHRGP_NM")[0] = db_fields.at(L"DMND_INCHRG_NM")[0];
 
 					if (db_fields.at(L"DMND_INCHRG_TLE")[0] == DEFAULT_FAX_COLUMN_VALUE_FOR_STRING)
 						db_fields.at(L"DMND_INCHRG_TLE")[0] = L"국세조사관";
@@ -4428,7 +4823,21 @@ namespace selvy {
 				txt_file.close();
 #endif
 
-				return db_fields;
+				std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>> extracted_fields;
+				for (const auto& fields : db_fields) {
+					std::wstring key;
+					std::vector<std::wstring> values;
+					std::tie(key, values) = fields;
+
+					std::vector<std::pair<cv::Rect, std::wstring>> converted_values;
+					for (const auto& value : values) {
+						converted_values.emplace_back(std::make_pair(cv::Rect(), value));
+					}
+
+					extracted_fields.emplace(std::make_pair(key, std::make_pair(L"", converted_values)));
+				}
+
+				return std::make_pair(std::unordered_map<std::wstring, std::wstring>(), extracted_fields);
 			}
 
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
@@ -4505,254 +4914,254 @@ namespace selvy {
 				bool is_dri_set = false;
 				try {
 					// cv::parallel_for_(cv::Range(0, files.size()), [&](const cv::Range& range) {
-						CComPtr<FREngine::IEngineLoader> loader;
-						FREngine::IEnginePtr engine;
-						std::tie(loader, engine) = get_engine_object(configuration);
+					CComPtr<FREngine::IEngineLoader> loader;
+					FREngine::IEnginePtr engine;
+					std::tie(loader, engine) = get_engine_object(configuration, false);
 
-						auto classification_engine = engine->CreateClassificationEngine();
-						auto classification_model = classification_engine->
-							CreateModelFromFile(get_classification_model(configuration).c_str());
+					auto classification_engine = engine->CreateClassificationEngine();
+					auto classification_model = classification_engine->
+						CreateModelFromFile(get_classification_model(configuration).c_str());
 
-						// for (auto i = range.start; i < range.end; i++) {
-						for (auto i = 0; i < files.size(); i++) {
-							memory_reader memory_reader(boost::filesystem::absolute(files[i]), secret);
+					// for (auto i = range.start; i < range.end; i++) {
+					for (auto i = 0; i < files.size(); i++) {
+						memory_reader memory_reader(boost::filesystem::absolute(files[i]), secret);
 
-							if (is_document_filtered(memory_reader.decrypted_)) {
-								continue;
-							}
+						if (is_document_filtered(memory_reader.decrypted_)) {
+							continue;
+						}
 
-							auto document = engine->CreateFRDocument();
-							document->AddImageFileFromStream(&memory_reader, nullptr, nullptr, nullptr, boost::filesystem::path(files[i]).filename().native().c_str());
-							auto page_preprocessing_params = engine->CreatePagePreprocessingParams();
-							page_preprocessing_params->CorrectOrientation = VARIANT_TRUE;
-							page_preprocessing_params->OrientationDetectionParams->put_OrientationDetectionMode(FREngine::OrientationDetectionModeEnum::ODM_Thorough);
-							document->Preprocess(page_preprocessing_params, nullptr, nullptr, nullptr);
+						auto document = engine->CreateFRDocument();
+						document->AddImageFileFromStream(&memory_reader, nullptr, nullptr, nullptr, boost::filesystem::path(files[i]).filename().native().c_str());
+						auto page_preprocessing_params = engine->CreatePagePreprocessingParams();
+						page_preprocessing_params->CorrectOrientation = VARIANT_TRUE;
+						page_preprocessing_params->OrientationDetectionParams->put_OrientationDetectionMode(FREngine::OrientationDetectionModeEnum::ODM_Thorough);
+						document->Preprocess(page_preprocessing_params, nullptr, nullptr, nullptr);
 
-							if (document->Pages->Count < 1) {
-								document->Close();
-								continue;
-							}
+						if (document->Pages->Count < 1) {
+							document->Close();
+							continue;
+						}
 
 #ifdef LOG_USE_WOFSTREAM
-							txt_file << L"-----------------------------------------------------" << std::endl;
-							txt_file << L"File : " << files[i] << std::endl;
+						txt_file << L"-----------------------------------------------------" << std::endl;
+						txt_file << L"File : " << files[i] << std::endl;
 #endif
 
-							const auto class_name = classify_document(engine, configuration, classification_engine, classification_model, files[i], document);
-							if (class_name.empty()) {
-								document->Close();
-								continue;
-							}
-
-							const std::set<std::wstring> processed_class_names{
-								L"Agreement Cover Page",
-								L"Financial Transaction Information Request",
-								L"Debt Repayment Inquiry",
-								L"Bottom Contact Info Page",
-								L"FTIR Next Page With Contact Info",
-								L"Confiscation Search Verification Warrent",
-								L"Certificate Of Trial",
-								L"IDCard Of A PO With Contact Info",
-								L"FTIR Next Page With Email",
-								L"Cover Page Top Down Info",
-								// L"Cover Page Tax Service Fax"
-								// L"Cover Page Tax Service Logo",
-								// L"Cover Page Police Agency Logo",
-							};
-
-							// 인식할 필요가 없는 문서는 pass
-							if (processed_class_names.find(class_name) == processed_class_names.end()) {
-								document->Close();
-								continue;
-							}
-
-							// 세트에 동의서가 포함되었는지 여부
-							if (class_name == L"Agreement Cover Page") {
-								has_agreement = true;
-
-								document->Close();
-								continue;
-							}
-
-							if (class_name == L"Certificate Of Trial") {
-								has_trial_cert = true;
-
-								document->Close();
-								continue;
-							}
-
-							if (class_name == L"Debt Repayment Inquiry")
-								is_dri_set = true;
-
-							std::vector<block> blocks;
-							cv::Size image_size;
-							std::tie(blocks, std::ignore, image_size) = recognize_document(engine, configuration, class_name, files[i], document);
-							if (image_size.area() == 0)
-								image_size = estimate_paper_size(blocks);
+						const auto class_name = classify_document(engine, configuration, classification_engine, classification_model, files[i], document);
+						if (class_name.empty()) {
 							document->Close();
+							continue;
+						}
 
-							const auto keywords = get_keywords(configuration, keywords_, class_name);
-							const auto searched_fields = search_fields(class_name, keywords, blocks);
+						const std::set<std::wstring> processed_class_names{
+							L"Agreement Cover Page",
+							L"Financial Transaction Information Request",
+							L"Debt Repayment Inquiry",
+							L"Bottom Contact Info Page",
+							L"FTIR Next Page With Contact Info",
+							L"Confiscation Search Verification Warrent",
+							L"Certificate Of Trial",
+							L"IDCard Of A PO With Contact Info",
+							L"FTIR Next Page With Email",
+							L"Cover Page Top Down Info",
+							// L"Cover Page Tax Service Fax"
+							// L"Cover Page Tax Service Logo",
+							// L"Cover Page Police Agency Logo",
+						};
 
-							std::unordered_map<std::wstring, std::wstring> extracted_fields;
+						// 인식할 필요가 없는 문서는 pass
+						if (processed_class_names.find(class_name) == processed_class_names.end()) {
+							document->Close();
+							continue;
+						}
 
-							if (class_name == L"Financial Transaction Information Request") {
-								const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
-								const auto document_number = extract_document_number(class_name, searched_fields, blocks, image_size);
-								const auto grace_period = extract_grace_period(class_name, searched_fields, blocks, image_size);
-								const auto warrant_number_value = extract_warrant_number(class_name, searched_fields, blocks, image_size);
-								const auto warrant_number = std::get<1>(warrant_number_value);
-								const auto use_purpose = extract_use_purpose(configuration, class_name, searched_fields, blocks, image_size);
-								const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, request_organ);
-								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
-								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
-								auto manager_position_value = extract_manager_position(configuration, class_name, searched_fields, blocks, image_size, request_organ);;
-								auto manager_position = std::get<1>(manager_position_value);
-								const auto executive_name_value = extract_executive_name(class_name, searched_fields, blocks, image_size, request_organ);
-								auto executive_name = std::get<1>(executive_name_value);
-								const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, manager_position_value, executive_name_value, image_size, request_organ);
+						// 세트에 동의서가 포함되었는지 여부
+						if (class_name == L"Agreement Cover Page") {
+							has_agreement = true;
 
-								fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
-								fill_field(extracted_fields, L"DOC_NO", document_number);
-								fill_field(extracted_fields, L"NOTICE_DTRRD_PRD", grace_period);
-								fill_field(extracted_fields, L"USE_OBJCTV_CD", use_purpose);
-								fill_field(extracted_fields, L"WARRNT_DOC_NO", warrant_number);
-								fill_field(extracted_fields, L"TELNO", telephone_number);
-								fill_field(extracted_fields, L"FAX_NO", fax_number);
-								fill_field(extracted_fields, L"EMAIL_ID", email_address);
-								fill_field(extracted_fields, L"DMND_INCHRG_TLE", manager_position);
-								fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
-								fill_field(extracted_fields, L"DMND_CHRGP_NM", executive_name);
+							document->Close();
+							continue;
+						}
+
+						if (class_name == L"Certificate Of Trial") {
+							has_trial_cert = true;
+
+							document->Close();
+							continue;
+						}
+
+						if (class_name == L"Debt Repayment Inquiry")
+							is_dri_set = true;
+
+						std::vector<block> blocks;
+						cv::Size image_size;
+						std::tie(blocks, std::ignore, image_size) = recognize_document(engine, configuration, class_name, files[i], document);
+						if (image_size.area() == 0)
+							image_size = estimate_paper_size(blocks);
+						document->Close();
+
+						const auto keywords = get_keywords(configuration, keywords_, class_name);
+						const auto searched_fields = search_fields(class_name, keywords, blocks);
+
+						std::unordered_map<std::wstring, std::wstring> extracted_fields;
+
+						if (class_name == L"Financial Transaction Information Request") {
+							const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
+							const auto document_number = extract_document_number(class_name, searched_fields, blocks, image_size);
+							const auto grace_period = extract_grace_period(class_name, searched_fields, blocks, image_size);
+							const auto warrant_number_value = extract_warrant_number(class_name, searched_fields, blocks, image_size);
+							const auto warrant_number = std::get<1>(warrant_number_value);
+							const auto use_purpose = extract_use_purpose(configuration, class_name, searched_fields, blocks, image_size);
+							const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, request_organ);
+							const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
+							const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
+							auto manager_position_value = extract_manager_position(configuration, class_name, searched_fields, blocks, image_size, request_organ);;
+							auto manager_position = std::get<1>(manager_position_value);
+							const auto executive_name_value = extract_executive_name(class_name, searched_fields, blocks, image_size, request_organ);
+							auto executive_name = std::get<1>(executive_name_value);
+							const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, manager_position_value, executive_name_value, image_size, request_organ);
+
+							fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
+							fill_field(extracted_fields, L"DOC_NO", document_number);
+							fill_field(extracted_fields, L"NOTICE_DTRRD_PRD", grace_period);
+							fill_field(extracted_fields, L"USE_OBJCTV_CD", use_purpose);
+							fill_field(extracted_fields, L"WARRNT_DOC_NO", warrant_number);
+							fill_field(extracted_fields, L"TELNO", telephone_number);
+							fill_field(extracted_fields, L"FAX_NO", fax_number);
+							fill_field(extracted_fields, L"EMAIL_ID", email_address);
+							fill_field(extracted_fields, L"DMND_INCHRG_TLE", manager_position);
+							fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
+							fill_field(extracted_fields, L"DMND_CHRGP_NM", executive_name);
+						}
+						else if (class_name == L"Debt Repayment Inquiry") {
+							const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
+							const auto document_number = extract_document_number(class_name, searched_fields, blocks, image_size);
+							const auto grace_period = extract_grace_period(class_name, searched_fields, blocks, image_size);
+							const auto warrant_number_value = extract_warrant_number(class_name, searched_fields, blocks, image_size);
+							const auto warrant_number = std::get<1>(warrant_number_value);
+							const auto use_purpose = extract_use_purpose(configuration, class_name, searched_fields, blocks, image_size);
+							const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, request_organ);
+							const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
+							const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
+							auto manager_position_value = extract_manager_position(configuration, class_name, searched_fields, blocks, image_size, request_organ);
+							auto manager_position = std::get<1>(manager_position_value);
+							const auto executive_name_value = extract_executive_name(class_name, searched_fields, blocks, image_size, request_organ);
+							auto executive_name = std::get<1>(executive_name_value);
+							const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, manager_position_value, executive_name_value, image_size, request_organ);
+
+							if (!manager_name.empty() && executive_name.empty()) {
+								executive_name = manager_name;
 							}
-							else if (class_name == L"Debt Repayment Inquiry") {
-								const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
-								const auto document_number = extract_document_number(class_name, searched_fields, blocks, image_size);
-								const auto grace_period = extract_grace_period(class_name, searched_fields, blocks, image_size);
-								const auto warrant_number_value = extract_warrant_number(class_name, searched_fields, blocks, image_size);
-								const auto warrant_number = std::get<1>(warrant_number_value);
-								const auto use_purpose = extract_use_purpose(configuration, class_name, searched_fields, blocks, image_size);
-								const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, request_organ);
-								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
-								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
-								auto manager_position_value = extract_manager_position(configuration, class_name, searched_fields, blocks, image_size, request_organ);
-								auto manager_position = std::get<1>(manager_position_value);
-								const auto executive_name_value = extract_executive_name(class_name, searched_fields, blocks, image_size, request_organ);
-								auto executive_name = std::get<1>(executive_name_value);
-								const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, manager_position_value, executive_name_value, image_size, request_organ);
 
-								if (!manager_name.empty() && executive_name.empty()) {
-									executive_name = manager_name;
-								}
+							fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
+							fill_field(extracted_fields, L"DOC_NO", document_number);
+							fill_field(extracted_fields, L"NOTICE_DTRRD_PRD", grace_period);
+							fill_field(extracted_fields, L"USE_OBJCTV_CD", use_purpose);
+							fill_field(extracted_fields, L"WARRNT_DOC_NO", warrant_number);
+							fill_field(extracted_fields, L"TELNO", telephone_number);
+							fill_field(extracted_fields, L"FAX_NO", fax_number);
+							fill_field(extracted_fields, L"EMAIL_ID", email_address);
+							fill_field(extracted_fields, L"DMND_INCHRG_TLE", manager_position);
+							fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
+							fill_field(extracted_fields, L"DMND_INCHRG_NM", executive_name);
+						}
+						else if (class_name == L"Confiscation Search Verification Warrent") {
+							const auto warrant_number_value = extract_warrant_number(class_name, searched_fields, blocks, image_size);
+							const auto warrant_number = std::get<1>(warrant_number_value);
+							const auto crime_name = extract_crime_name(configuration, class_name, searched_fields, blocks, warrant_number_value, image_size);
 
-								fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
-								fill_field(extracted_fields, L"DOC_NO", document_number);
-								fill_field(extracted_fields, L"NOTICE_DTRRD_PRD", grace_period);
-								fill_field(extracted_fields, L"USE_OBJCTV_CD", use_purpose);
-								fill_field(extracted_fields, L"WARRNT_DOC_NO", warrant_number);
-								fill_field(extracted_fields, L"TELNO", telephone_number);
-								fill_field(extracted_fields, L"FAX_NO", fax_number);
-								fill_field(extracted_fields, L"EMAIL_ID", email_address);
-								fill_field(extracted_fields, L"DMND_INCHRG_TLE", manager_position);
-								fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
-								fill_field(extracted_fields, L"DMND_INCHRG_NM", executive_name);
-							}
-							else if (class_name == L"Confiscation Search Verification Warrent") {
-								const auto warrant_number_value = extract_warrant_number(class_name, searched_fields, blocks, image_size);
-								const auto warrant_number = std::get<1>(warrant_number_value);
-								const auto crime_name = extract_crime_name(configuration, class_name, searched_fields, blocks, warrant_number_value, image_size);
+							fill_field(extracted_fields, L"WARRNT_DOC_NO", warrant_number);
+							fill_field(extracted_fields, L"CRIME_NM", crime_name);
+						}
+						else if (class_name == L"Bottom Contact Info Page") {
+							const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
+							const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
+							const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
 
-								fill_field(extracted_fields, L"WARRNT_DOC_NO", warrant_number);
-								fill_field(extracted_fields, L"CRIME_NM", crime_name);
-							}
-							else if (class_name == L"Bottom Contact Info Page") {
-								const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
-								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
-								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
+							fill_field(extracted_fields, L"TELNO", telephone_number);
+							fill_field(extracted_fields, L"FAX_NO", fax_number);
+							fill_field(extracted_fields, L"EMAIL_ID", email_address);
+						}
+						else if (class_name == L"FTIR Next Page With Contact Info") {
+							const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
+							const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
+							const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
+							const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, std::make_pair(cv::Rect(), L""), std::make_pair(cv::Rect(), L""), image_size, L"");
 
-								fill_field(extracted_fields, L"TELNO", telephone_number);
-								fill_field(extracted_fields, L"FAX_NO", fax_number);
-								fill_field(extracted_fields, L"EMAIL_ID", email_address);
-							}
-							else if (class_name == L"FTIR Next Page With Contact Info") {
-								const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
-								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
-								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
-								const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, std::make_pair(cv::Rect(), L""), std::make_pair(cv::Rect(), L""), image_size, L"");
+							fill_field(extracted_fields, L"TELNO", telephone_number);
+							fill_field(extracted_fields, L"FAX_NO", fax_number);
+							fill_field(extracted_fields, L"EMAIL_ID", email_address);
+							fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
+						}
+						else if (class_name == L"IDCard Of A PO With Contact Info") {
+							const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
+							const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
+							const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
+							const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
+							auto manager_position_value = extract_manager_position(configuration, class_name, searched_fields, blocks, image_size, request_organ);
+							auto manager_position = std::get<1>(manager_position_value);
+							const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, manager_position_value, std::make_pair(cv::Rect(), L""), image_size, request_organ);
 
-								fill_field(extracted_fields, L"TELNO", telephone_number);
-								fill_field(extracted_fields, L"FAX_NO", fax_number);
-								fill_field(extracted_fields, L"EMAIL_ID", email_address);
-								fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
-							}
-							else if (class_name == L"IDCard Of A PO With Contact Info") {
-								const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
-								const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
-								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
-								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
-								auto manager_position_value = extract_manager_position(configuration, class_name, searched_fields, blocks, image_size, request_organ);
-								auto manager_position = std::get<1>(manager_position_value);
-								const auto manager_name = extract_manager_name(class_name, searched_fields, blocks, manager_position_value, std::make_pair(cv::Rect(), L""), image_size, request_organ);
+							fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
+							fill_field(extracted_fields, L"TELNO", telephone_number);
+							fill_field(extracted_fields, L"FAX_NO", fax_number);
+							fill_field(extracted_fields, L"EMAIL_ID", email_address);
+							fill_field(extracted_fields, L"DMND_INCHRG_TLE", manager_position);
+							fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
+						}
+						else if (class_name == L"FTIR Next Page With Email") {
+							const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
 
-								fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
-								fill_field(extracted_fields, L"TELNO", telephone_number);
-								fill_field(extracted_fields, L"FAX_NO", fax_number);
-								fill_field(extracted_fields, L"EMAIL_ID", email_address);
-								fill_field(extracted_fields, L"DMND_INCHRG_TLE", manager_position);
-								fill_field(extracted_fields, L"DMND_INCHRG_NM", manager_name);
-							}
-							else if (class_name == L"FTIR Next Page With Email") {
-								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
+							fill_field(extracted_fields, L"EMAIL_ID", email_address);
+						}
+						else if (class_name == L"Cover Page Top Down Info") {
+							const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
+							const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
+							const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
+							const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
 
-								fill_field(extracted_fields, L"EMAIL_ID", email_address);
-							}
-							else if (class_name == L"Cover Page Top Down Info") {
-								const auto request_organ = extract_request_organ(configuration, class_name, searched_fields, blocks, image_size);
-								const auto telephone_number = extract_telephone_number(class_name, searched_fields, blocks, image_size, L"");
-								const auto fax_number = extract_fax_number(class_name, searched_fields, blocks, telephone_number, image_size);
-								const auto email_address = extract_email_address(class_name, searched_fields, blocks, image_size);
-
-								fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
-								fill_field(extracted_fields, L"TELNO", telephone_number);
-								fill_field(extracted_fields, L"FAX_NO", fax_number);
-								fill_field(extracted_fields, L"EMAIL_ID", email_address);
-							}
+							fill_field(extracted_fields, L"DEMAND_INSTI", request_organ);
+							fill_field(extracted_fields, L"TELNO", telephone_number);
+							fill_field(extracted_fields, L"FAX_NO", fax_number);
+							fill_field(extracted_fields, L"EMAIL_ID", email_address);
+						}
 
 #if defined(_DEBUG)
-							const auto image = debug_;
+						const auto image = debug_;
 #endif
 
 #ifdef LOG_USE_WOFSTREAM            // 문서단위 결과
-							const auto text = to_wstring(blocks);
-							txt_file << L"ALL : " << std::endl;
-							txt_file << text << std::endl << std::endl;
+						const auto text = to_wstring(blocks);
+						txt_file << L"ALL : " << std::endl;
+						txt_file << text << std::endl << std::endl;
 
-							txt_file << L"- 파일 : " << files[i] << std::endl;
-							txt_file << L"- 분류 : " << class_name << std::endl;
+						txt_file << L"- 파일 : " << files[i] << std::endl;
+						txt_file << L"- 분류 : " << class_name << std::endl;
 
-							txt_file << "- " << convert_field_column_to_string(L"DEMAND_INSTI") << " : " << get_field_value(extracted_fields, L"DEMAND_INSTI") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"DOC_NO") << " : " << get_field_value(extracted_fields, L"DOC_NO") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"NOTICE_DTRRD_PRD") << " : " << get_field_value(extracted_fields, L"NOTICE_DTRRD_PRD") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"USE_OBJCTV_CD") << " : " << get_field_value(extracted_fields, L"USE_OBJCTV_CD") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"WARRNT_DOC_NO") << " : " << get_field_value(extracted_fields, L"WARRNT_DOC_NO") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"CRIME_NM") << " : " << get_field_value(extracted_fields, L"CRIME_NM") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"TELNO") << " : " << get_field_value(extracted_fields, L"TELNO") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"FAX_NO") << " : " << get_field_value(extracted_fields, L"FAX_NO") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"EMAIL_ID") << " : " << get_field_value(extracted_fields, L"EMAIL_ID") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"DMND_INCHRG_TLE") << " : " << get_field_value(extracted_fields, L"DMND_INCHRG_TLE") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"DMND_INCHRG_NM") << " : " << get_field_value(extracted_fields, L"DMND_INCHRG_NM") << std::endl;
-							txt_file << "- " << convert_field_column_to_string(L"DMND_CHRGP_NM") << " : " << get_field_value(extracted_fields, L"DMND_CHRGP_NM") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"DEMAND_INSTI") << " : " << get_field_value(extracted_fields, L"DEMAND_INSTI") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"DOC_NO") << " : " << get_field_value(extracted_fields, L"DOC_NO") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"NOTICE_DTRRD_PRD") << " : " << get_field_value(extracted_fields, L"NOTICE_DTRRD_PRD") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"USE_OBJCTV_CD") << " : " << get_field_value(extracted_fields, L"USE_OBJCTV_CD") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"WARRNT_DOC_NO") << " : " << get_field_value(extracted_fields, L"WARRNT_DOC_NO") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"CRIME_NM") << " : " << get_field_value(extracted_fields, L"CRIME_NM") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"TELNO") << " : " << get_field_value(extracted_fields, L"TELNO") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"FAX_NO") << " : " << get_field_value(extracted_fields, L"FAX_NO") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"EMAIL_ID") << " : " << get_field_value(extracted_fields, L"EMAIL_ID") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"DMND_INCHRG_TLE") << " : " << get_field_value(extracted_fields, L"DMND_INCHRG_TLE") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"DMND_INCHRG_NM") << " : " << get_field_value(extracted_fields, L"DMND_INCHRG_NM") << std::endl;
+						txt_file << "- " << convert_field_column_to_string(L"DMND_CHRGP_NM") << " : " << get_field_value(extracted_fields, L"DMND_CHRGP_NM") << std::endl;
 #endif
 
-							if (extracted_fields.empty())
-								continue;
+						if (extracted_fields.empty())
+							continue;
 
-							if (fields.find(class_name) == fields.end())
-								fields.emplace(class_name, std::vector<std::unordered_map<std::wstring, std::wstring>>());
+						if (fields.find(class_name) == fields.end())
+							fields.emplace(class_name, std::vector<std::unordered_map<std::wstring, std::wstring>>());
 
-							fields.at(class_name).emplace_back(extracted_fields);
-						}
+						fields.at(class_name).emplace_back(extracted_fields);
+					}
 
-						release_engine_object(std::make_pair(loader, engine));
+					release_engine_object(std::make_pair(loader, engine), false);
 					// } , std::stoi(configuration.at(L"engine").at(L"concurrency")));
 				}
 				catch (_com_error& e) {
@@ -4785,28 +5194,28 @@ namespace selvy {
 				};
 
 				std::unordered_map<std::wstring, std::vector<std::wstring>> db_fields = {
-					{ L"DEMAND_INSTI", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"INFO_REQ_INSTI_MK", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"DLV_AMT_MK", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"DOC_NO", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"WARRNT_DOC_NO", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"DMND_INCHRG_TLE", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"DMND_INCHRG_NM", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"DMND_CHRGP_NM", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"TELNO", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"FAX_NO", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"LEGAL_BASE_MK", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"USE_OBJCTV_CD", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"NOTICE_DTRRD_PRD", { DEFAULT_FAX_COLUMN_VALUE_FOR_PRD } },
-					{ L"NOTICE_DTRRD_RSN", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"CRIME_NM", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"EMAIL_ID", { DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
-					{ L"DOC_TYPE", { DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
-					{ L"OTHER1", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
-					{ L"OTHER2", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
-					{ L"OTHER3", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
-					{ L"OTHER4", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
-					{ L"OTHER5", { DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"DEMAND_INSTI",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"INFO_REQ_INSTI_MK",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"DLV_AMT_MK",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"DOC_NO",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"WARRNT_DOC_NO",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"DMND_INCHRG_TLE",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"DMND_INCHRG_NM",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"DMND_CHRGP_NM",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"TELNO",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"FAX_NO",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"LEGAL_BASE_MK",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"USE_OBJCTV_CD",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"NOTICE_DTRRD_PRD",{ DEFAULT_FAX_COLUMN_VALUE_FOR_PRD } },
+					{ L"NOTICE_DTRRD_RSN",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"CRIME_NM",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"EMAIL_ID",{ DEFAULT_FAX_COLUMN_VALUE_FOR_STRING } },
+					{ L"DOC_TYPE",{ DEFAULT_FAX_COLUMN_VALUE_FOR_CODE } },
+					{ L"OTHER1",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"OTHER2",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"OTHER3",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"OTHER4",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
+					{ L"OTHER5",{ DEFAULT_FAX_COLUMN_VALUE_FOR_OTHER } },
 				};
 
 				const std::vector<std::wstring> ordered_categories = {
@@ -5209,7 +5618,8 @@ namespace selvy {
 			}
 
 			static std::wstring
-				convert_use_objctv_cd_to_string(const std::wstring& field_column) {
+				convert_use_objctv_cd_to_string(const std::wstring& field_column)
+			{
 				const std::unordered_map<std::wstring, std::wstring> use_objctv_cd_map = {
 					{ L"1", L"1. 수사상" },
 					{ L"2", L"2. 조세관련" },
@@ -5227,7 +5637,8 @@ namespace selvy {
 			}
 
 			static std::wstring
-				convert_notice_dtrrd_rsn_to_string(const std::wstring& field_column) {
+				convert_notice_dtrrd_rsn_to_string(const std::wstring& field_column)
+			{
 				const std::unordered_map<std::wstring, std::wstring> notice_dtrrd_rsn_map = {
 					{ L"1", L"1. 증거인멸" },
 					{ L"2", L"2. 세무조사" },
@@ -5244,17 +5655,18 @@ namespace selvy {
 			}
 
 			static std::wstring
-				convert_crime_nm_to_string(const std::wstring& field_column) {
+				convert_crime_nm_to_string(const std::wstring& field_column)
+			{
 				const std::unordered_map<std::wstring, std::wstring> crime_nm_map = {
 					{ L"01", L"01. 뇌물,알선수재(수뢰)" },
-					{ L"02", L"횡령" },
-					{ L"03", L"사기,사기자금" },
-					{ L"04", L"정치자금법위반" },
-					{ L"05", L"상습도박&복표" },
+					{ L"02", L"02. 횡령" },
+					{ L"03", L"03. 사기,사기자금" },
+					{ L"04", L"04. 정치자금법위반" },
+					{ L"05", L"05. 상습도박&복표" },
 					{ L"06", L"06. 통화,유가증권위조" },
 					{ L"07", L"07. 범죄수익" },
 					{ L"08", L"08. 자금세탁" },
-					{ L"09", L"09. 절도,징물,도난" },
+					{ L"09", L"09. 절도,장물,도난" },
 					{ L"10", L"10. 조직범죄" },
 					{ L"11", L"11. 증권거래법위반" },
 					{ L"12", L"12. 밀수,마약범죄" },
@@ -5271,7 +5683,8 @@ namespace selvy {
 			}
 
 			static std::wstring
-				convert_notice_doc_type_to_string(const std::wstring& field_column) {
+				convert_notice_doc_type_to_string(const std::wstring& field_column)
+			{
 				const std::unordered_map<std::wstring, std::wstring> notice_doc_type_map = {
 					{ L"1", L"1. 개인" },
 				};
@@ -5291,8 +5704,8 @@ namespace selvy {
 				requester = boost::regex_replace(requester, boost::wregex(L"국[세|새]{1}[칭|청]{1}"), L"국세청");
 				requester = boost::regex_replace(requester, boost::wregex(L"[새|세]{1}[무|문]{1}서"), L"세무서");
 				requester = boost::regex_replace(requester, boost::wregex(L"업무자원센터"), L"업무지원센터");
-				requester = boost::regex_replace(requester, boost::wregex(L"은행"), L"은행");
-				requester = boost::regex_replace(requester, boost::wregex(L"김●사원"), L"감사원");
+				requester = boost::regex_replace(requester, boost::wregex(L"온행"), L"은행");
+				requester = boost::regex_replace(requester, boost::wregex(L"김•사원"), L"감사원");
 
 				return std::make_pair(std::get<0>(request_organ), requester);
 			}
@@ -5300,17 +5713,16 @@ namespace selvy {
 			static std::pair<cv::Rect, std::wstring>
 				preprocess_email_address(const std::pair<cv::Rect, std::wstring>& email)
 			{
-				std::wstring email_address = boost::regex_replace(std::get<1>(email), boost::wregex(L"ⓒ"), L"ⓒ");
+				std::wstring email_address = boost::regex_replace(std::get<1>(email), boost::wregex(L"©"), L"@");
 				email_address = boost::regex_replace(email_address, boost::wregex(L","), L".");
 				email_address = boost::regex_replace(email_address, boost::wregex(L"go.kf"), L"go.kr");
-				email_address = boost::regex_replace(email_address, boost::wregex(L"nls.go.kr"), L"nts.go.kr");
+				email_address = boost::regex_replace(email_address, boost::wregex(L"n[l|t][s|e].go.kr"), L"nts.go.kr");
+				email_address = boost::regex_replace(email_address, boost::wregex(L"nonghy(.*)om"), L"nonghyup.com");
+				email_address = boost::regex_replace(email_address, boost::wregex(L"non(.*)hyup.com"), L"nonghyup.com");
+				email_address = boost::regex_replace(email_address, boost::wregex(L"Dolice.go.kr"), L"police.go.kr");
 
 				return std::make_pair(std::get<0>(email), email_address);
 			}
-
-
-			
-			
 
 			static std::wstring
 				postprocess_email_address(const std::wstring& email_address)
@@ -5391,6 +5803,7 @@ namespace selvy {
 				number = boost::regex_replace(number, boost::wregex(L"0[sS]{1}0"), L"050");
 				number = boost::regex_replace(number, boost::wregex(L"030"), L"050");
 				number = boost::regex_replace(number, boost::wregex(L"l"), L"1");
+				number = boost::regex_replace(number, boost::wregex(L"1SB"), L"193");
 
 				return std::make_pair(std::get<0>(fax_number), number);
 			}
@@ -5479,6 +5892,18 @@ namespace selvy {
 			}
 
 			static std::pair<cv::Rect, std::wstring>
+				preprocess_use_purpose(const std::pair<cv::Rect, std::wstring>& use_purpose)
+			{
+				return std::make_pair(std::get<0>(use_purpose), boost::regex_replace(std::get<1>(use_purpose), boost::wregex(L"중여세"), L"증여세"));
+			}
+
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_manager_position(const std::pair<cv::Rect, std::wstring>& manager_position)
+			{
+				return std::make_pair(std::get<0>(manager_position), boost::regex_replace(std::get<1>(manager_position), boost::wregex(L":ᄌ:이"), L"주임"));
+			}
+
+			static std::pair<cv::Rect, std::wstring>
 				preprocess_name(const std::pair<cv::Rect, std::wstring>& name)
 			{
 				return std::make_pair(std::get<0>(name), boost::regex_replace(std::get<1>(name), boost::wregex(L"\\."), L","));
@@ -5488,10 +5913,14 @@ namespace selvy {
 				postprocess_name(const std::wstring& name)
 			{
 				auto cleaned = boost::regex_replace(name, boost::wregex(L"(?:이?메일(?:주소)?|전화(?:번호)?|팩스(?:번호)?|연락처?|(?:e[-_]?)?mail(?:주소)?)?[^가-힣,]"), L"");
-				cleaned = boost::regex_replace(cleaned, boost::wregex(L"검사|검사보|경위|계장|과장|대리|부장|사무관|조사관|차장|주임|경감|경사|경장|경정|경제팀|수사관|순경|검찰수사관|계상보|계장보|고객행복센터|과장님|과장대리|과장보|담당자|부지점장|사이버팀|세무조사관|업무직|업무팀|주암|주임|직원|텔러|행원|검사역"), L"");
-				cleaned = boost::regex_replace(name, boost::wregex(L"(?:이?메일(?:주소)|[전진견]{1}화(?:[번민빈인]{1}호)?|연락처|(?:e[-_]?)?mail(?:주소)|주소)"), L"");
-				cleaned = boost::regex_replace(name, boost::wregex(L",,"), L"");
-				cleaned = boost::regex_replace(name, boost::wregex(L"([전진견]{1}화[번민빈인]{1}호)"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"검사|검사보|경위|계장|과장|대리|부장|사무관|조사관|차장|﻿주임|경감|경사|경장|경정|경제팀|수사관|순경|﻿검찰수사관|계상보|계장보|고객행복센터|과장님|과장대리|과장보|담당자|부지점장|사이버팀|세무조사관|업무직|업무팀|주암|주임|직원|텔러|행원|﻿검사역"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"(?:이?메일(?:주소)|[전진견]{1}화(?:[번민빈인]{1}호)?|연락처|(?:e[-_]?)?mail(?:주소)|주소)"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L",,"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"([전진견]{1}화[번민빈인]{1}호)"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"번호"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"팩스"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"사무실"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"신분증(.*)"), L"");
 
 				if (cleaned.size() < 2)
 					return L"";
@@ -5505,9 +5934,10 @@ namespace selvy {
 				auto cleaned = boost::replace_all_copy(document_number, L"\n", L" ");
 				cleaned = boost::regex_replace(cleaned, boost::wregex(L" "), L"");
 				cleaned = boost::regex_replace(cleaned, boost::wregex(L"(20[0-9]{2}[.,]{1,2}[0-9]{1,2}[.,]{1,2}[0-9]{1,2}[,.]?)"), L"");
-				cleaned = boost::regex_replace(cleaned, boost::wregex(L"(요구일자|담당자|전화|fax|금융거래|통보유예|특이사항|법적근거|사유|아닌|경우|상이)(.*)"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"(요구일자|담당자|전화|fax|금융거래|[통|동]보유예|[특|득]이사항|법적근거|사유|아닌|경우|상이|영장)(.*)"), L"");
 				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[^-가-힣A-Za-z0-9]"), L"");
 				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[님|남]{1}세"), L"납세");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"(.*)(번호)"), L"");
 
 				if (cleaned.size() < 4 || cleaned.size() > 26)
 					return L"";
@@ -5534,11 +5964,11 @@ namespace selvy {
 
 			static std::wstring
 				extract_request_organ(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
-				if ((category != L"Debt Repayment Inquiry" && category != L"Cover Page Top Down Info")
+				if ((category != L"Debt Repayment Inquiry" && category != L"Cover Page Top Down Info" && category != L"Cover Page Tax Service Logo")
 					&& fields.find(L"요구기관명") == fields.end())
 					return L"";
 
@@ -5564,16 +5994,19 @@ namespace selvy {
 						std::vector<line> bottom_lines;
 						std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(bottom_lines), [&](const line& line) {
 							const auto line_rect = to_rect(line);
-							return line_rect.y > paper.height * 3 / 4 && line.size() < 7 && line_rect.height > 27;
+							const auto line_str = to_wstring(line);
+							const int threshold =
+								boost::regex_replace(line_str, boost::wregex(L" "), L"").find(L"검찰청") != std::wstring::npos ? 26 : 27;
+							return line_rect.y > paper.height * 3 / 4 && line.size() < 7 && line_rect.height > threshold;
 						});
 
 						requested_organs = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 							std::make_tuple(cv::Rect(), L"", cv::Range())
 						}, std::vector<block> {bottom_lines},
-						default_search,
-						preprocess_request_organ,
-						create_extract_function(configuration, L"requester", 2),
-						postprocess_uppercase);
+								default_search,
+								preprocess_request_organ,
+								create_extract_function(configuration, L"requester", 2),
+								postprocess_uppercase);
 					}
 
 					if (requested_organs.empty() && fields.find(L"기관명") != fields.end()) {
@@ -5666,10 +6099,10 @@ namespace selvy {
 						requested_organs = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 							std::make_tuple(cv::Rect(), L"", cv::Range())
 						}, std::vector<block> {blocks[0]},
-						default_search,
-						preprocess_request_organ,
-						create_extract_function(configuration, L"requester", 1),
-						postprocess_uppercase);
+								default_search,
+								preprocess_request_organ,
+								create_extract_function(configuration, L"requester", 1),
+								postprocess_uppercase);
 					}
 
 					if (requested_organs.empty())
@@ -5693,12 +6126,46 @@ namespace selvy {
 					auto requested_organs = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 						std::make_tuple(cv::Rect(), L"", cv::Range())
 					}, std::vector<block> {top_lines},
-					default_search,
-					preprocess_request_organ,
-					create_extract_function(configuration, L"requester", 1),
-					postprocess_uppercase);
+							default_search,
+							preprocess_request_organ,
+							create_extract_function(configuration, L"requester", 1),
+							postprocess_uppercase);
 
 					return requested_organs.empty() ? L"" : std::get<1>(requested_organs[0]);
+				}
+				else if (category == L"Cover Page Tax Service Fax") {
+					if (fields.at(L"요구기관명").size() >= 2) {
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& second_field = { fields.at(L"요구기관명")[1] };
+
+						auto requested_organs = extract_field_values(second_field, blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 0.9, 100, true),
+							preprocess_request_organ,
+							create_extract_function(configuration, L"requester", 2),
+							postprocess_uppercase);
+
+						if (requested_organs.empty()) {
+							requested_organs = extract_field_values(fields.at(L"요구기관명"), blocks,
+								search_self,
+								preprocess_request_organ,
+								create_extract_function(configuration, L"requester", 2),
+								postprocess_uppercase);
+						}
+
+						return requested_organs.empty() ? L"" : std::get<1>(requested_organs[0]);
+					}
+				}
+				else if (category == L"Cover Page Tax Service Logo") {
+					if (fields.find(L"전화번호") != fields.end() && fields.at(L"전화번호").size() >= 2) {
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& second_field = { fields.at(L"전화번호")[1] };
+
+						auto requested_organs = extract_field_values(second_field, blocks,
+							std::bind(find_up_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 7, false),
+							preprocess_request_organ,
+							create_extract_function(configuration, L"requester", 2),
+							postprocess_uppercase);
+
+						return requested_organs.empty() ? L"" : std::get<1>(requested_organs[0]);
+					}
 				}
 
 				return L"";
@@ -5706,9 +6173,9 @@ namespace selvy {
 
 			static std::wstring
 				extract_telephone_number(const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size, const std::wstring request_organ)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, const std::wstring request_organ)
 			{
 				if (fields.find(L"전화번호") == fields.end())
 					return L"";
@@ -5760,6 +6227,38 @@ namespace selvy {
 							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70))[)-]{0,2})?([0-9-]{7,10}))"),
 							postprocess_telephone_number);
 					}
+
+					// FTIR 은행에서 농협은행 통해서 국회의원 관련 요구
+					if (category == L"Financial Transaction Information Request"
+						&& telephone_numbers.empty()
+						&& fields.find(L"담당자") != fields.end()) {
+						auto suspected_horizontal_telephone_number = extract_field_values(fields.at(L"담당자"), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_telephone_number,
+							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70))[)-]{0,2})?([0-9-]{7,10}))"),
+							postprocess_telephone_number);
+
+						auto suspected_vertical_telephone_number = extract_field_values(fields.at(L"전화번호"), blocks,
+							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_telephone_number,
+							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70))[)-]{0,2})?([0-9-]{7,10}))"),
+							postprocess_telephone_number);
+
+						for (auto i = 0; i < suspected_horizontal_telephone_number.size(); i++) {
+							for (auto j = 0; j < suspected_vertical_telephone_number.size(); j++) {
+								if (std::get<0>(suspected_horizontal_telephone_number[i]) == std::get<0>(suspected_vertical_telephone_number[j])) {
+									telephone_numbers.push_back(suspected_vertical_telephone_number[j]);
+								}
+							}
+						}
+					}
+					else if (category == L"IDCard Of A PO With Contact Info" && telephone_numbers.empty()) {
+						telephone_numbers = extract_field_values(number_fields.at(L"전화번호"), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 0.9, 100, true),
+							preprocess_telephone_number,
+							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70))[)-]{0,2})?([0-9-]{7,10}))"),
+							postprocess_telephone_number);
+					}
 				}
 				else if (category == L"Cover Page Top Down Info") {
 					std::vector<line> bottom_lines;
@@ -5780,6 +6279,44 @@ namespace selvy {
 							preprocess_telephone_number,
 							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70))[)-]{0,2})?([0-9-]{7,10}))"),
 							postprocess_telephone_number);
+					}
+				}
+				else if (category == L"Cover Page Tax Service Fax") {
+					if (fields.at(L"전화번호").size() >= 2) {
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& second_field = { fields.at(L"전화번호")[1] };
+
+						telephone_numbers = extract_field_values(second_field, blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_telephone_number,
+							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70))[)-]{0,2})?([0-9-]{7,10}))"),
+							postprocess_telephone_number);
+
+						if (telephone_numbers.empty()) {
+							telephone_numbers = extract_field_values(second_field, blocks,
+								search_self,
+								preprocess_telephone_number,
+								create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70))[)-]{0,2})?([0-9-]{7,10}))"),
+								postprocess_telephone_number);
+						}
+					}
+				}
+				else if (category == L"Cover Page Tax Service Logo") {
+					if (fields.at(L"전화번호").size() >= 2) {
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& second_field = { fields.at(L"전화번호")[1] };
+
+						telephone_numbers = extract_field_values(second_field, blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_telephone_number,
+							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70))[)-]{0,2})?([0-9-]{7,10}))"),
+							postprocess_telephone_number);
+
+						if (telephone_numbers.empty()) {
+							telephone_numbers = extract_field_values(second_field, blocks,
+								search_self,
+								preprocess_telephone_number,
+								create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70))[)-]{0,2})?([0-9-]{7,10}))"),
+								postprocess_telephone_number);
+						}
 					}
 				}
 
@@ -5826,8 +6363,8 @@ namespace selvy {
 
 			static std::wstring
 				extract_fax_number(const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const std::wstring& telephone_number, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const std::wstring& telephone_number, const cv::Size& image_size)
 			{
 				if (fields.find(L"팩스번호") == fields.end())
 					return L"";
@@ -5841,7 +6378,7 @@ namespace selvy {
 					|| category == L"IDCard Of A PO With Contact Info") {
 					std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> correct_fields;
 					for (const auto& number_field : fields.at(L"팩스번호")) {
-						const auto& number = std::get<1>(number_field);
+						const auto number = std::get<1>(number_field);
 						if (number.find(L"수신") != std::wstring::npos) {
 							continue;
 						}
@@ -5896,6 +6433,63 @@ namespace selvy {
 							postprocess_fax_number);
 					}
 				}
+				else if (category == L"Cover Page Tax Service Fax") {
+					if (fields.at(L"팩스번호").size() >= 2) {
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& second_field = { fields.at(L"팩스번호")[1] };
+
+						fax_numbers = extract_field_values(second_field, blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_fax_number,
+							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[0-5]\\d?|6[1-4]))[)-]{0,2})?([0-9-]{7,11}))"),
+							postprocess_fax_number);
+
+						if (fax_numbers.empty()) {
+							fax_numbers = extract_field_values(second_field, blocks,
+								search_self,
+								preprocess_fax_number,
+								create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[0-5]\\d?|6[1-4]))[)-]{0,2})?([0-9-]{7,11}))"),
+								postprocess_fax_number);
+						}
+					}
+				}
+				else if (category == L"Cover Page Tax Service Logo") {
+					if (fields.at(L"팩스번호").size() >= 2) {
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& second_field = { fields.at(L"팩스번호")[1] };
+
+						fax_numbers = extract_field_values(second_field, blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_fax_number,
+							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[0-5]\\d?|6[1-4]))[)-]{0,2})?([0-9-]{7,11}))"),
+							postprocess_fax_number);
+
+						if (fax_numbers.empty()) {
+							fax_numbers = extract_field_values(second_field, blocks,
+								search_self,
+								preprocess_fax_number,
+								create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[0-5]\\d?|6[1-4]))[)-]{0,2})?([0-9-]{7,11}))"),
+								postprocess_fax_number);
+						}
+					}
+				}
+				else if (category == L"Cover Page Police Agency Logo") {
+					if (fields.at(L"팩스번호").size() >= 2) {
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& second_field = { fields.at(L"팩스번호")[0] };
+
+						fax_numbers = extract_field_values(fields.at(L"팩스번호"), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_fax_number,
+							create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[0-5]\\d?|6[1-4]))[)-]{0,2})?([0-9-]{7,11}))"),
+							postprocess_fax_number);
+
+						if (fax_numbers.empty()) {
+							fax_numbers = extract_field_values(fields.at(L"팩스번호"), blocks,
+								search_self,
+								preprocess_fax_number,
+								create_extract_function(L"(((?:0(?:2|3[1-3]|4[1-4]|5[0-5]\\d?|6[1-4]))[)-]{0,2})?([0-9-]{7,11}))"),
+								postprocess_fax_number);
+						}
+					}
+				}
 
 				if (fax_numbers.empty())
 					return L"";
@@ -5941,9 +6535,9 @@ namespace selvy {
 
 			static std::wstring
 				extract_email_address(const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (category != L"FTIR Next Page With Email" && fields.find(L"이메일주소") == fields.end())
 					return L"";
@@ -5959,7 +6553,7 @@ namespace selvy {
 						create_extract_function(L"([ A-Z0-9._%+-]+@[A-Z0-9.-]+\\.(?:KR|COM|ORG))"),
 						postprocess_email_address);
 				}
-				else if (category == L"Debt Repayment Inquuiry"
+				else if (category == L"Debt Repayment Inquiry"
 					|| category == L"IDCard Of A PO With Contact Info") {
 					email_addresses = extract_field_values(fields.at(L"이메일주소"), blocks,
 						search_self,
@@ -5985,10 +6579,10 @@ namespace selvy {
 					email_addresses = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 						std::make_tuple(cv::Rect(), L"", cv::Range())
 					}, std::vector<block> {bottom_lines},
-					default_search,
-					std::bind(&fax_document_recognizer::preprocess_email_address, std::placeholders::_1),
-					create_extract_function(L"([ A-Z0-9._%+-]+@[A-Z0-9.-]+\\.(?:KR|COM|ORG))"),
-					postprocess_email_address);
+							default_search,
+							std::bind(&fax_document_recognizer::preprocess_email_address, std::placeholders::_1),
+							create_extract_function(L"([ A-Z0-9._%+-]+@[A-Z0-9.-]+\\.(?:KR|COM|ORG))"),
+							postprocess_email_address);
 
 					email_addresses = extract_field_values(fields.at(L"이메일주소"), std::vector<block> {bottom_lines},
 						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
@@ -6004,15 +6598,49 @@ namespace selvy {
 							postprocess_email_address);
 					}
 				}
+				else if (category == L"Cover Page Tax Service Fax") {
+					email_addresses = extract_field_values(fields.at(L"이메일주소"), blocks,
+						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						std::bind(&fax_document_recognizer::preprocess_email_address, std::placeholders::_1),
+						create_extract_function(L"([ A-Z0-9._%+-]+@[A-Z0-9.-]+\\.(?:KR|COM|ORG))"),
+						postprocess_email_address);
+
+					if (email_addresses.empty()) {
+						email_addresses = extract_field_values(fields.at(L"이메일주소"), blocks,
+							search_self,
+							std::bind(&fax_document_recognizer::preprocess_email_address, std::placeholders::_1),
+							create_extract_function(L"([ A-Z0-9._%+-]+@[A-Z0-9.-]+\\.(?:KR|COM|ORG))"),
+							postprocess_email_address);
+					}
+
+					return email_addresses.empty() ? L"" : std::get<1>(email_addresses[0]);
+				}
+				else if (category == L"Cover Page Tax Service Logo") {
+					email_addresses = extract_field_values(fields.at(L"이메일주소"), blocks,
+						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						std::bind(&fax_document_recognizer::preprocess_email_address, std::placeholders::_1),
+						create_extract_function(L"([ A-Z0-9._%+-]+@[A-Z0-9.-]+\\.(?:KR|COM|ORG))"),
+						postprocess_email_address);
+
+					if (email_addresses.empty()) {
+						email_addresses = extract_field_values(fields.at(L"이메일주소"), blocks,
+							search_self,
+							std::bind(&fax_document_recognizer::preprocess_email_address, std::placeholders::_1),
+							create_extract_function(L"([ A-Z0-9._%+-]+@[A-Z0-9.-]+\\.(?:KR|COM|ORG))"),
+							postprocess_email_address);
+					}
+
+					return email_addresses.empty() ? L"" : std::get<1>(email_addresses[0]);
+				}
 
 				if (email_addresses.empty()) {
 					email_addresses = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 						std::make_tuple(cv::Rect(), L"", cv::Range())
 					}, blocks,
-					default_search,
-					std::bind(&fax_document_recognizer::preprocess_email_address, std::placeholders::_1),
-					create_extract_function(L"([ A-Z0-9._%+-]+@[A-Z0-9.-]+\\.(?:KR|COM|ORG))"),
-					postprocess_email_address);
+						default_search,
+							std::bind(&fax_document_recognizer::preprocess_email_address, std::placeholders::_1),
+							create_extract_function(L"([ A-Z0-9._%+-]+@[A-Z0-9.-]+\\.(?:KR|COM|ORG))"),
+							postprocess_email_address);
 				}
 
 				if (email_addresses.empty())
@@ -6048,8 +6676,8 @@ namespace selvy {
 
 			static std::wstring
 				extract_grace_period(const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"유예기간") == fields.end())
 					return DEFAULT_FAX_COLUMN_VALUE_FOR_PRD;
@@ -6083,14 +6711,14 @@ namespace selvy {
 						auto grace_periods_zero = extract_field_values(fields.at(L"유예기간"), blocks,
 							search_self,
 							default_preprocess,
-							create_extract_function(L"([없업엇엄][옴은운]|[생셍][략락낙]|[즉슥]시)"),
+							create_extract_function(L"([없업엇엄][음은운]|[생셍][략락낙]|[즉슥]시)"),
 							default_postprocess);
 
 						if (grace_periods_zero.empty()) {
 							grace_periods_zero = extract_field_values(fields.at(L"유예기간"), blocks,
 								std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 								default_preprocess,
-								create_extract_function(L"([없업엇엄][옴은운]|[생셍][략락낙]|[즉슥]시)"),
+								create_extract_function(L"([없업엇엄][음은운]|[생셍][략락낙]|[즉슥]시)"),
 								default_postprocess);
 						}
 
@@ -6119,10 +6747,187 @@ namespace selvy {
 			}
 
 			static std::wstring
+				extract_document_number_using_region(const FREngine::IEnginePtr& engine, const FREngine::IFRDocumentPtr& document,
+					const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& origin_blocks)
+			{
+				if (fields.find(L"문서번호") == fields.end())
+					return L"";
+
+				std::vector<std::pair<cv::Rect, std::wstring>> document_numbers;
+				document_numbers = extract_field_values(fields.at(L"문서번호"), origin_blocks,
+					std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					std::bind(&fax_document_recognizer::postprocess_document_number, std::placeholders::_1));
+
+				if (document_numbers.empty()) {
+					document_numbers = extract_field_values(fields.at(L"문서번호"), origin_blocks,
+						search_self,
+						default_preprocess,
+						default_extract,
+						std::bind(&fax_document_recognizer::postprocess_document_number, std::placeholders::_1));
+				}
+
+				//if (document_numbers.empty())
+				//return L"";
+
+				std::wstring document_number;
+				if (!document_numbers.empty() && boost::regex_search(std::get<1>(document_numbers[0]), boost::wregex(L"[A-Z]", boost::regex_constants::icase))) {
+					for (const auto& document_number_field : fields.at(L"문서번호")) {
+						if (document->Pages->Item(0)->Layout != nullptr)
+							document->Pages->Item(0)->Layout->Clean();
+
+						cv::Size image_size = cv::Size(document->Pages->Item(0)->ImageDocument->GrayImage->Width, document->Pages->Item(0)->ImageDocument->GrayImage->Height);
+
+						FREngine::IRegionPtr region = engine->CreateRegion();
+						int top = std::get<0>(document_number_field).y - (std::get<0>(document_number_field).height * 2);
+						if (top <= 0)
+							top = 0;
+						int bottom = std::get<0>(document_number_field).br().y + (std::get<0>(document_number_field).height * 2);
+						if (bottom >= image_size.height)
+							bottom = image_size.height;
+						region->AddRect(0, top, image_size.width, bottom);
+
+						FREngine::IBlockPtr new_block = document->Pages->Item(0)->Layout->Blocks->AddNew(FREngine::BT_Text, region, 0);
+
+						document->Recognize(nullptr, nullptr);
+
+						const auto plain_text = document->Pages->Item(0)->PlainText;
+
+						std::vector<block> blocks;
+						std::vector<std::vector<int>> confidences;
+						std::tie(blocks, confidences) = to_blocks(plain_text);
+						cv::Size size = estimate_paper_size(blocks);
+
+						refine_blocks(blocks, true, true, true, false);
+
+						const auto text = to_wstring(blocks);
+						float max_area = 0.0;
+						for (auto& block : blocks) {
+							for (auto& line : block) {
+								for (auto i = 0; i < line.size(); i++) {
+									auto& line_rect = to_rect(line[i]);
+									auto& target_rect = to_rect(document_numbers[0]);
+
+									if (max_area < (line_rect & target_rect).area()) {
+										max_area = (line_rect & target_rect).area();
+										document_number = to_wstring(line[i]);
+									}
+								}
+							}
+						}
+
+						if (!document_number.empty() && !boost::regex_search(document_number, boost::wregex(L"[A-Z]", boost::regex_constants::icase)))
+							break;
+					}
+				}
+				else {
+					if (document->Pages->Item(0)->Layout != nullptr)
+						document->Pages->Item(0)->Layout->Clean();
+
+					cv::Size image_size = cv::Size(document->Pages->Item(0)->ImageDocument->GrayImage->Width, document->Pages->Item(0)->ImageDocument->GrayImage->Height);
+
+					FREngine::IRegionPtr region = engine->CreateRegion();
+					region->AddRect(0, 0, image_size.width, image_size.height / 2);
+
+					FREngine::IBlockPtr new_block = document->Pages->Item(0)->Layout->Blocks->AddNew(FREngine::BT_Text, region, 0);
+
+					document->Recognize(nullptr, nullptr);
+
+					const auto plain_text = document->Pages->Item(0)->PlainText;
+
+					std::vector<block> blocks;
+					std::vector<std::vector<int>> confidences;
+					std::tie(blocks, confidences) = to_blocks(plain_text);
+					cv::Size size = estimate_paper_size(blocks);
+
+					refine_blocks(blocks, true, true, true, false);
+
+					const auto text = to_wstring(blocks);
+
+					remove_small_character(blocks);
+
+					const auto keywords = get_keywords(configuration, keywords_, category);
+					const auto searched_fields = search_fields(category, keywords, blocks);
+
+					//document_number = extract_document_number(category, searched_fields, blocks, size);
+					document_numbers = extract_field_values(searched_fields.at(L"문서번호"), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						std::bind(&fax_document_recognizer::postprocess_document_number, std::placeholders::_1));
+
+					if (document_numbers.empty()) {
+						document_numbers = extract_field_values(searched_fields.at(L"문서번호"), blocks,
+							search_self,
+							default_preprocess,
+							default_extract,
+							std::bind(&fax_document_recognizer::postprocess_document_number, std::placeholders::_1));
+					}
+
+					if (document_numbers.empty())
+						document_number = L"";
+					else
+						document_number = std::get<1>(document_numbers[0]);
+				}
+
+				if (boost::regex_search(document_number, boost::wregex(L"[A-Z]", boost::regex_constants::icase)))
+					return L"";
+
+				document_number = postprocess_document_number(document_number);
+
+				return document_number;
+
+				/*std::wstring document_number;
+				for (const auto& document_number_field : fields.at(L"문서번호")) {
+				if (document->Pages->Item(0)->Layout != nullptr)
+				document->Pages->Item(0)->Layout->Clean();
+
+				cv::Size image_size = cv::Size(document->Pages->Item(0)->ImageDocument->GrayImage->Width, document->Pages->Item(0)->ImageDocument->GrayImage->Height);
+
+				FREngine::IRegionPtr region = engine->CreateRegion();
+				int top = std::get<0>(document_number_field).y - (std::get<0>(document_number_field).height * 2);
+				if (top <= 0)
+				top = 0;
+				int bottom = std::get<0>(document_number_field).br().y + (std::get<0>(document_number_field).height * 2);
+				if (bottom >= image_size.height)
+				bottom = image_size.height;
+				region->AddRect(0, top, image_size.width, bottom);
+
+				FREngine::IBlockPtr new_block = document->Pages->Item(0)->Layout->Blocks->AddNew(FREngine::BT_Text, region, 0);
+
+				document->Recognize(nullptr, nullptr);
+
+				const auto plain_text = document->Pages->Item(0)->PlainText;
+
+				std::vector<block> blocks;
+				std::vector<std::vector<int>> confidences;
+				std::tie(blocks, confidences) = to_blocks(plain_text);
+				cv::Size size = estimate_paper_size(blocks);
+
+				refine_blocks(blocks, true, true, true, false);
+
+				const auto text = to_wstring(blocks);
+
+				const auto keywords = get_keywords(configuration, keywords_, category);
+				const auto searched_fields = search_fields(category, keywords, blocks);
+
+				document_number = extract_document_number(category, fields, blocks, size);
+
+				if (!document_number.empty())
+				break;
+				}
+
+				return document_number;*/
+			}
+
+			static std::wstring
 				extract_document_number(const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"문서번호") == fields.end())
 					return L"";
@@ -6144,16 +6949,50 @@ namespace selvy {
 							default_extract,
 							std::bind(&fax_document_recognizer::postprocess_document_number, std::placeholders::_1));
 					}
+
+					if (category == L"Financial Transaction Information Request" && document_numbers.empty()) {
+						document_numbers = extract_field_values(fields.at(L"문서번호"), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 2.0, 100, true),
+							default_preprocess,
+							default_extract,
+							std::bind(&fax_document_recognizer::postprocess_document_number, std::placeholders::_1));
+
+						if (!document_numbers.empty()) {
+							int idx_prefix = -1;
+							int idx_postfix = -1;
+							for (int i = 0; i < document_numbers.size(); i++) {
+								if (std::get<1>(document_numbers[i]).find(L"국회의원") != std::wstring::npos) {
+									idx_prefix = i;
+								}
+								if (std::get<1>(document_numbers[i]).find(L"후원회") != std::wstring::npos) {
+									idx_postfix = i;
+								}
+							}
+
+							if (idx_prefix != -1 && idx_postfix != -1) {
+								auto document_number = std::get<1>(document_numbers[idx_prefix]) + std::get<1>(document_numbers[idx_postfix]);
+								if (boost::regex_search(document_number, boost::wregex(L"[A-Z]", boost::regex_constants::icase))) {
+									return L"";
+								}
+								else {
+									return document_number;
+								}
+							}
+						}
+					}
 				}
 
-				return document_numbers.empty() ? L"" : std::get<1>(document_numbers[0]);
+				if (document_numbers.empty() || boost::regex_search(std::get<1>(document_numbers[0]), boost::wregex(L"[A-Z]", boost::regex_constants::icase)))
+					return L"";
+
+				return std::get<1>(document_numbers[0]);
 			}
 
 			static std::pair<cv::Rect, std::wstring>
 				extract_warrant_number(const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				std::pair<cv::Rect, std::wstring> warrant_number;
 
@@ -6192,9 +7031,9 @@ namespace selvy {
 
 			static std::wstring
 				extract_crime_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, std::pair<cv::Rect, std::wstring> warrant_number_value, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, std::pair<cv::Rect, std::wstring> warrant_number_value, const cv::Size& image_size)
 			{
 				if (fields.find(L"죄명") == fields.end())
 					return L"";
@@ -6306,20 +7145,20 @@ namespace selvy {
 			{
 
 				const std::unordered_map<std::wstring, std::vector<std::wstring>> crime_name_codes = {
-					{ L"01", { L"뇌물", L"알선수재", L"수뢰" } },
-					{ L"02", { L"횡령" } },
-					{ L"03", { L"사기", L"사기자금" } },
-					{ L"04", { L"정치자금법위반" } },
-					{ L"05", { L"상습도박", L"복표" } },
-					{ L"06", { L"통화", L"유가증권위조" } },
-					{ L"07", { L"범죄수익" } },
-					{ L"08", { L"자금세탁" } },
-					{ L"09", { L"절도", L"장물", L"도난" } },
-					{ L"10", { L"조직범죄" } },
-					{ L"11", { L"증권거래법위반" } },
-					{ L"12", { L"밀수", L"마약범죄" } },
-					{ L"13", { L"테러자금조달" } },
-					{ L"14", { L"기타" } },
+					{ L"01",{ L"뇌물", L"알선수재", L"수뢰" } },
+					{ L"02",{ L"횡령" } },
+					{ L"03",{ L"사기", L"사기자금" } },
+					{ L"04",{ L"정치자금법위반" } },
+					{ L"05",{ L"상습도박", L"복표" } },
+					{ L"06",{ L"통화", L"유가증권위조" } },
+					{ L"07",{ L"범죄수익" } },
+					{ L"08",{ L"자금세탁" } },
+					{ L"09",{ L"절도", L"장물", L"도난" } },
+					{ L"10",{ L"조직범죄" } },
+					{ L"11",{ L"증권거래법위반" } },
+					{ L"12",{ L"밀수", L"마약범죄" } },
+					{ L"13",{ L"테러자금조달" } },
+					{ L"14",{ L"기타" } },
 				};
 
 				for (const auto& crime_name_code : crime_name_codes) {
@@ -6334,9 +7173,9 @@ namespace selvy {
 
 			static std::wstring
 				extract_use_purpose(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"사용목적") == fields.end())
 					return L"";
@@ -6344,15 +7183,15 @@ namespace selvy {
 				std::vector<std::pair<cv::Rect, std::wstring>> use_purposes;
 
 				use_purposes = extract_field_values(fields.at(L"사용목적"), blocks,
-				std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-					default_preprocess,
+					std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+					preprocess_use_purpose,
 					create_extract_function(configuration, L"purpose", 2),
 					default_postprocess);
 
 				if (use_purposes.empty()) {
 					use_purposes = extract_field_values(fields.at(L"사용목적"), blocks,
 						search_self,
-						default_preprocess,
+						preprocess_use_purpose,
 						create_extract_function(configuration, L"purpose", 2),
 						default_postprocess);
 				}
@@ -6362,8 +7201,8 @@ namespace selvy {
 
 			static std::pair<cv::Rect, std::wstring>
 				extract_manager_position(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size, const std::wstring request_organ)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, const std::wstring request_organ)
 			{
 				std::pair<cv::Rect, std::wstring> manager_position;
 
@@ -6376,20 +7215,20 @@ namespace selvy {
 					if (request_organ == L"감사원") {
 						suspected_horizontal_manager_position = extract_field_values(fields.at(L"담당자"), blocks,
 							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 0.9, 100, true),
-							default_preprocess,
+							preprocess_manager_position,
 							default_extract,
 							std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 					}
 					else {
 						suspected_horizontal_manager_position = extract_field_values(fields.at(L"담당자"), blocks,
 							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							default_preprocess,
+							preprocess_manager_position,
 							default_extract,
 							std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 						if (suspected_horizontal_manager_position.empty()) {
 							suspected_horizontal_manager_position = extract_field_values(fields.at(L"담당자"), blocks,
 								std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 0.9, 100, true),
-								default_preprocess,
+								preprocess_manager_position,
 								default_extract,
 								std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 						}
@@ -6397,7 +7236,7 @@ namespace selvy {
 
 					auto suspected_vertical_manager_position = extract_field_values(fields.at(L"직책"), blocks,
 						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-						default_preprocess,
+						preprocess_manager_position,
 						default_extract,
 						std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 
@@ -6415,14 +7254,14 @@ namespace selvy {
 						if (category == L"Financial Transaction Information Request") {
 							manager_positions = extract_field_values(fields.at(L"직책"), blocks,
 								std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-								default_preprocess,
+								preprocess_manager_position,
 								default_extract,
 								std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 
 							if (manager_positions.empty()) {
 								manager_positions = extract_field_values(fields.at(L"직책"), blocks,
 									search_self,
-									default_preprocess,
+									preprocess_manager_position,
 									default_extract,
 									std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 							}
@@ -6430,7 +7269,7 @@ namespace selvy {
 							if (manager_positions.empty() && fields.at(L"직책").empty()) {
 								auto suspected_horizontal_requester = extract_field_values(fields.at(L"요구자"), blocks,
 									std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-									default_preprocess,
+									preprocess_manager_position,
 									default_extract,
 									default_postprocess);
 								boost::remove_erase_if(suspected_horizontal_requester, [&fields](const std::pair<cv::Rect, std::wstring>& suspected_requester) {
@@ -6444,7 +7283,7 @@ namespace selvy {
 
 								auto suspected_vertical_request_date = extract_field_values(fields.at(L"요구일자"), blocks,
 									std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-									default_preprocess,
+									preprocess_manager_position,
 									default_extract,
 									default_postprocess);
 								boost::remove_erase_if(suspected_vertical_request_date, [&fields](const std::pair<cv::Rect, std::wstring>& suspected_date) {
@@ -6468,7 +7307,7 @@ namespace selvy {
 												std::make_tuple(std::get<0>(suspected_vertical_request_date[j]), std::get<1>(suspected_vertical_request_date[j]), cv::Range()) };
 											suspected_vertical_manager_position = extract_field_values(suspected_manager_position_field, blocks,
 												std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-												default_preprocess,
+												preprocess_manager_position,
 												default_extract,
 												std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 
@@ -6487,7 +7326,7 @@ namespace selvy {
 						else if (category == L"Debt Repayment Inquiry") {
 							manager_positions = extract_field_values(fields.at(L"담당자"), blocks,
 								search_self,
-								default_preprocess,
+								preprocess_manager_position,
 								create_extract_function(configuration, L"position", 0),
 								default_postprocess);
 						}
@@ -6499,14 +7338,22 @@ namespace selvy {
 				else if (category == L"IDCard Of A PO With Contact Info") {
 					auto manager_positions = extract_field_values(fields.at(L"직책"), blocks,
 						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-						default_preprocess,
+						preprocess_manager_position,
 						create_extract_function(configuration, L"position", 0),
 						std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 
 					if (manager_positions.empty()) {
 						manager_positions = extract_field_values(fields.at(L"직책"), blocks,
 							search_self,
-							default_preprocess,
+							preprocess_manager_position,
+							create_extract_function(configuration, L"position", 0),
+							std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
+					}
+
+					if (manager_positions.empty()) {
+						manager_positions = extract_field_values(fields.at(L"직책"), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 0.9, 100, true),
+							preprocess_manager_position,
 							create_extract_function(configuration, L"position", 0),
 							std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 					}
@@ -6516,7 +7363,7 @@ namespace selvy {
 							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{std::make_tuple(cv::Rect(), L"", cv::Range())},
 							blocks,
 							default_search,
-							default_preprocess,
+							preprocess_manager_position,
 							create_extract_function(configuration, L"position", 0),
 							std::bind(&fax_document_recognizer::postprocess_position, std::placeholders::_1));
 
@@ -6535,11 +7382,11 @@ namespace selvy {
 
 			static std::wstring
 				extract_manager_name(const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks,
-				std::pair<cv::Rect, std::wstring> manager_position_value, std::pair<cv::Rect, std::wstring> executive_name_value, const cv::Size& image_size, const std::wstring request_organ)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks,
+					std::pair<cv::Rect, std::wstring> manager_position_value, std::pair<cv::Rect, std::wstring> executive_name_value, const cv::Size& image_size, const std::wstring request_organ)
 			{
-				if (fields.find(L"담당자") == fields.end())
+				if (category != L"Cover Page Tax Service Fax" && fields.find(L"담당자") == fields.end())
 					return L"";
 
 				if (category == L"Financial Transaction Information Request"
@@ -6592,8 +7439,9 @@ namespace selvy {
 									|| executive_name_rect == std::get<0>(suspected_vertical_manager_name[j]))
 									continue;
 
-								if (executive_name_rect.empty())
-									return std::get<1>(suspected_vertical_manager_name[j]);
+								if (executive_name_rect.empty()) {
+									return std::get<1>(suspected_vertical_manager_name[j]).size() > 10 ? std::get<1>(suspected_vertical_manager_name[j]).substr(0, 10) : std::get<1>(suspected_vertical_manager_name[j]);
+								}
 
 								if (executive_name_rect.y > 0 && std::get<0>(suspected_vertical_manager_name[j]).y < executive_name_rect.y) {
 									if (manager_name.find(std::get<1>(suspected_vertical_manager_name[j])) == std::wstring::npos)
@@ -6603,7 +7451,7 @@ namespace selvy {
 						}
 					}
 					if (!manager_name.empty())
-						return manager_name;
+						return manager_name.size() > 10 ? manager_name.substr(0, 10) : manager_name;
 
 					// 1줄 짜리 성명
 					std::vector<std::pair<cv::Rect, std::wstring>> manager_names;
@@ -6622,13 +7470,17 @@ namespace selvy {
 								std::bind(&fax_document_recognizer::postprocess_name, std::placeholders::_1));
 						}
 
+						if (!manager_names.empty() && std::get<1>(manager_names[0]).size() > 10) {
+							manager_names.clear();
+						}
+
 						if (manager_names.empty()) {
 							if (!fields.at(L"담당자").empty() && !fields.at(L"성명").empty()) {
 								if (request_organ == L"감사원" && !suspected_vertical_manager_name.empty()) {
-									return std::get<1>(suspected_vertical_manager_name.front());
+									return std::get<1>(suspected_vertical_manager_name.front()).size() > 10 ? std::get<1>(suspected_vertical_manager_name.front()).substr(0, 10) : std::get<1>(suspected_vertical_manager_name.front());
 								}
 								else if (!suspected_horizontal_manager_name.empty()) {
-									return std::get<1>(suspected_horizontal_manager_name.back());
+									return std::get<1>(suspected_horizontal_manager_name.back()).size() > 10 ? std::get<1>(suspected_horizontal_manager_name.back()).substr(0, 10) : std::get<1>(suspected_horizontal_manager_name.back());
 								}
 							}
 						}
@@ -6651,7 +7503,8 @@ namespace selvy {
 					}
 
 					if (!manager_names.empty())
-						return std::get<1>(manager_names[0]);
+						return std::get<1>(manager_names[0]).size() > 10 ? std::get<1>(manager_names[0]).substr(0, 10) : std::get<1>(manager_names[0]);
+
 				}
 				else if (category == L"FTIR Next Page With Contact Info") {
 					auto manager_names = extract_field_values(fields.at(L"담당자"), blocks,
@@ -6669,7 +7522,7 @@ namespace selvy {
 					}
 
 					if (!manager_names.empty())
-						return std::get<1>(manager_names[0]);
+						return std::get<1>(manager_names[0]).size() > 10 ? std::get<1>(manager_names[0]).substr(0, 10) : std::get<1>(manager_names[0]);
 				}
 				else if (category == L"IDCard Of A PO With Contact Info") {
 					auto manager_names = extract_field_values(fields.at(L"담당자"), blocks,
@@ -6683,7 +7536,7 @@ namespace selvy {
 							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 							default_preprocess,
 							default_extract,
-							std::bind(fax_document_recognizer::postprocess_name, std::placeholders::_1));
+							std::bind(&fax_document_recognizer::postprocess_name, std::placeholders::_1));
 					}
 
 					if (manager_names.empty()) {
@@ -6711,7 +7564,61 @@ namespace selvy {
 						max_height_idx = line_rect.height > max_height_idx ? i : max_height_idx;
 					}
 
-					return std::get<1>(manager_names[max_height_idx]);
+					return std::get<1>(manager_names[max_height_idx]).size() > 10 ? std::get<1>(manager_names[max_height_idx]).substr(0, 10) : std::get<1>(manager_names[max_height_idx]);
+				}
+				else if (category == L"Cover Page Tax Service Fax") {
+					if (fields.find(L"요구기관명") != fields.end() && fields.at(L"요구기관명").size() >= 2
+						&& fields.find(L"팩스번호") != fields.end() && fields.at(L"팩스번호").size() >= 2) {
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& request_organ_field = { fields.at(L"요구기관명")[1] };
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& fax_number_field = { fields.at(L"팩스번호")[1] };
+
+						auto suspected_vertical_down_manager_name = extract_field_values(request_organ_field, blocks,
+							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							default_preprocess,
+							default_extract,
+							default_postprocess);
+
+						auto suspected_vertical_up_manager_name = extract_field_values(fax_number_field, blocks,
+							std::bind(find_up_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							default_preprocess,
+							default_extract,
+							default_postprocess);
+
+						std::pair<cv::Rect, std::wstring> suspected_manager_name_field;
+						for (auto i = 0; i < suspected_vertical_down_manager_name.size(); i++) {
+							for (auto j = 0; j < suspected_vertical_up_manager_name.size(); j++) {
+								if (std::get<0>(suspected_vertical_down_manager_name[i]) == std::get<0>(suspected_vertical_up_manager_name[j])) {
+									suspected_manager_name_field = suspected_vertical_up_manager_name[j];
+								}
+							}
+						}
+
+						const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& manager_fields = { std::make_tuple(std::get<0>(suspected_manager_name_field), std::get<1>(suspected_manager_name_field), cv::Range()) };
+						auto manager_names = extract_field_values(manager_fields, blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_name,
+							default_extract,
+							std::bind(&fax_document_recognizer::postprocess_name, std::placeholders::_1));
+
+						return manager_names.empty() ? L"" : (std::get<1>(manager_names[0]).size() > 10 ? std::get<1>(manager_names[0]).substr(0, 10) : std::get<1>(manager_names[0]));
+					}
+				}
+				else if (category == L"Cover Page Police Agency Logo") {
+					auto manager_names = extract_field_values(fields.at(L"담당자"), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						std::bind(&fax_document_recognizer::postprocess_name, std::placeholders::_1));
+
+					if (manager_names.empty()) {
+						manager_names = extract_field_values(fields.at(L"담당자"), blocks,
+							search_self,
+							default_preprocess,
+							default_extract,
+							std::bind(&fax_document_recognizer::postprocess_name, std::placeholders::_1));
+					}
+
+					return manager_names.empty() ? L"" : (std::get<1>(manager_names[0]).size() > 10 ? std::get<1>(manager_names[0]).substr(0, 10) : std::get<1>(manager_names[0]));
 				}
 
 				return L"";
@@ -6719,10 +7626,10 @@ namespace selvy {
 
 			static std::pair<cv::Rect, std::wstring>
 				extract_executive_name(const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size, const std::wstring request_organ)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, const std::wstring request_organ)
 			{
-				std::pair<cv::Rect, std::wstring>executive_name;
+				std::pair<cv::Rect, std::wstring> executive_name;
 				if (fields.find(L"책임자") == fields.end())
 					return executive_name;
 
@@ -6835,6 +7742,11 @@ namespace selvy {
 			{
 				throw std::logic_error("not implmented");
 			}
+			std::pair<std::unordered_map<std::wstring, std::wstring>, std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>>
+				recognize(const boost::filesystem::path& path, const std::string& secret, const int ignore) override
+			{
+				throw std::logic_error("not implmented");
+			}
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
 				recognize(const boost::filesystem::path& path, const std::string& secret) override
 			{
@@ -6888,7 +7800,7 @@ namespace selvy {
 					CComPtr<FREngine::IEngineLoader> loader;
 					FREngine::IEnginePtr engine;
 #if __USE_ENGINE__
-					std::tie(loader, engine) = get_engine_object(configuration);
+					std::tie(loader, engine) = get_engine_object(configuration, false);
 #endif
 					FREngine::IClassificationEnginePtr classification_engine;
 					FREngine::IModelPtr classification_model;
@@ -6926,9 +7838,9 @@ namespace selvy {
 
 						auto class_name = classify_document(engine, configuration, classification_engine, classification_model, files[i], document);
 						if (class_name.empty()) {
-/*#ifdef __USE_ENGINE__
+							/*#ifdef __USE_ENGINE__
 							document->Close();
-#endif
+							#endif
 							continue;*/
 							class_name = L"OTHERS";
 						}
@@ -7449,7 +8361,7 @@ namespace selvy {
 					}
 
 #if __USE_ENGINE__
-					release_engine_object(std::make_pair(loader, engine));
+					release_engine_object(std::make_pair(loader, engine), false);
 #endif
 					// } , std::stoi(configuration.at(L"engine").at(L"concurrency")));
 				}
@@ -7462,7 +8374,7 @@ namespace selvy {
 
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
 				recognize(const boost::filesystem::path& path,
-				const std::wstring& class_name) override
+					const std::wstring& class_name) override
 			{
 				throw std::logic_error("not implmented");
 			}
@@ -7481,8 +8393,8 @@ namespace selvy {
 
 			static std::wstring
 				extract_company_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"COMPANY NAME") == fields.end())
 					return L"";
@@ -7528,7 +8440,7 @@ namespace selvy {
 			}
 
 			static void filter_fields(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& product_fields,
-									  std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& sub_product_fields) {
+				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& sub_product_fields) {
 
 				if (sub_product_fields.size() <= 0) {
 					return;
@@ -7550,8 +8462,8 @@ namespace selvy {
 
 			static std::vector<std::wstring>
 				extract_product_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"PRODUCT NAME") == fields.end())
 					return std::vector<std::wstring>();
@@ -7649,7 +8561,7 @@ namespace selvy {
 							std::bind(&coa_document_recognizer::postprocess_product_name, std::placeholders::_1, category));
 					}
 				}
-				else if (category == L"SUNGU"){
+				else if (category == L"SUNGU") {
 					product_name = extract_field_values(fields.at(L"PRODUCT NAME"), blocks,
 						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 						default_preprocess,
@@ -7666,7 +8578,7 @@ namespace selvy {
 						});
 					}
 				}
-				else if (category == L"LANXESS"){
+				else if (category == L"LANXESS") {
 					product_name = extract_field_values(fields.at(L"PRODUCT NAME"), blocks,
 						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 						default_preprocess,
@@ -7930,8 +8842,8 @@ namespace selvy {
 
 			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_lot_no(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				std::vector<std::pair<cv::Rect, std::wstring>> lot_numbers;
 
@@ -8139,7 +9051,7 @@ namespace selvy {
 					}
 
 					if (std::get<0>(top_lot_no_field).y < max_int) {
-						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> suggested_lot_no_fields = { top_lot_no_field  };
+						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> suggested_lot_no_fields = { top_lot_no_field };
 
 						lot_numbers = extract_field_values(suggested_lot_no_fields, blocks,
 							search_self,
@@ -8246,8 +9158,8 @@ namespace selvy {
 
 			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_date_of_production(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"DATE OF PRODUCTION") == fields.end())
 					return std::vector<std::pair<cv::Rect, std::wstring>>();
@@ -8320,19 +9232,19 @@ namespace selvy {
 						default_preprocess,
 						default_extract,
 						postprocess_only_date);
-					std::sort(dates.begin(), dates.end(), [](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b){
+					std::sort(dates.begin(), dates.end(), [](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
 						return a.second.length() > b.second.length();
 					});
 					if (dates.empty()) {
 						dates = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 							std::make_tuple(cv::Rect(), L"", cv::Range())
 						}, blocks,
-						default_search,
-						default_preprocess,
-						create_coa_extract_function(L"[0-9]{3,4}[. ]{1,2}[0-9]{2}[. ]{1,2}[0-9]{2}"),
-						postprocess_only_date);
+							default_search,
+								default_preprocess,
+								create_coa_extract_function(L"[0-9]{3,4}[. ]{1,2}[0-9]{2}[. ]{1,2}[0-9]{2}"),
+								postprocess_only_date);
 					}
-					std::sort(dates.begin(), dates.end(), [](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b){
+					std::sort(dates.begin(), dates.end(), [](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
 						return a.first.y > b.first.y;
 					});
 				}
@@ -8490,8 +9402,8 @@ namespace selvy {
 			}
 
 			static std::tuple<cv::Rect, cv::Rect, cv::Rect> getItemUnitResultRects(const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& items,
-																				   const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& units,
-																				   const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& results) {
+				const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& units,
+				const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& results) {
 				std::vector<std::pair<cv::Rect, cv::Rect>> temp_list;
 				for (auto& item : items) {
 					cv::Rect item_rect = field_to_rect(item);
@@ -8569,7 +9481,7 @@ namespace selvy {
 						continue;
 					}
 					cv::Rect item_rect = std::get<0>(items[i]);
-					if (rect.contains(item_rect.br() - cv::Point(1,1)) && rect.contains(item_rect.tl() + cv::Point(1,1))) {
+					if (rect.contains(item_rect.br() - cv::Point(1, 1)) && rect.contains(item_rect.tl() + cv::Point(1, 1))) {
 						return true;
 					}
 				}
@@ -8610,8 +9522,8 @@ namespace selvy {
 			}
 
 			static void remove_not_table(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& items,
-										 std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& units,
-										 std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& results) {
+				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& units,
+				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& results) {
 				remove_not_horizontal(items, results);
 				remove_not_horizontal(results, items);
 				remove_not_horizontal(units, items);
@@ -8642,7 +9554,7 @@ namespace selvy {
 			}
 
 			static std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> line_field_to_word_field(const std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& field,
-																								const std::vector<block>& blocks) {
+				const std::vector<block>& blocks) {
 				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> ret;
 				for (const auto& line_field : field) {
 					for (const auto& block : blocks) {
@@ -8718,8 +9630,8 @@ namespace selvy {
 
 			static std::unordered_map<std::wstring, std::vector<std::tuple<std::wstring, std::wstring, std::wstring>>>
 				extract_items_unit_results_using_log_no_pair(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size, const std::vector<std::pair<cv::Rect, std::wstring>> lot_no_pair) {
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, const std::vector<std::pair<cv::Rect, std::wstring>> lot_no_pair) {
 				std::unordered_map<std::wstring, std::vector<std::tuple<std::wstring, std::wstring, std::wstring>>> ret;
 				auto inner_lot = lot_no_pair;
 				if (inner_lot.empty()) {
@@ -8959,8 +9871,8 @@ namespace selvy {
 			}
 
 			static std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> remake_field(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>& field,
-																						   const std::vector<std::pair<cv::Rect, std::wstring>>& lot_numbers,
-																						   const std::vector<std::pair<cv::Rect, std::wstring>>& dates) {
+				const std::vector<std::pair<cv::Rect, std::wstring>>& lot_numbers,
+				const std::vector<std::pair<cv::Rect, std::wstring>>& dates) {
 				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> ret;
 				std::vector<bool> lot_flags(lot_numbers.size(), false);
 				std::vector<bool> date_flags(dates.size(), false);
@@ -9078,7 +9990,7 @@ namespace selvy {
 
 			static std::pair<cv::Rect, std::wstring> get_items_line(const std::vector<std::pair<cv::Rect, std::wstring>>& weihai_items, int start, int end) {
 				if (end < start) {
-					return std::make_pair(cv::Rect(0,0,0,0), L"");
+					return std::make_pair(cv::Rect(0, 0, 0, 0), L"");
 				}
 				return get_join_line(std::vector<std::pair<cv::Rect, std::wstring>>(weihai_items.begin() + start, weihai_items.begin() + end + 1));
 			}
@@ -9107,14 +10019,16 @@ namespace selvy {
 				for (int i = 0; i < basf_items.size(); ++i) {
 					if ((start_end_flag[i] & 16) != 0) {
 						break;
-					} else if ((start_end_flag[i] & 4) != 0) {
+					}
+					else if ((start_end_flag[i] & 4) != 0) {
 						if (i - 1 >= 0 && (start_end_flag[i - 1] & 8) != 0) {
 							ret.push_back(std::make_pair(basf_items[i].first, basf_items[i - 1].second + L" " + basf_items[i].second));
 						}
 						if (i - 2 >= 0 && (start_end_flag[i - 2] & 8) != 0) {
 							ret.push_back(std::make_pair(basf_items[i].first, basf_items[i - 2].second + L" " + basf_items[i].second));
 						}
-					} else if ((start_end_flag[i] & 2) != 0) {
+					}
+					else if ((start_end_flag[i] & 2) != 0) {
 						if (i + 1 < basf_items.size() &&
 							(start_end_flag[i + 1] & 8) == 0 &&
 							(start_end_flag[i + 1] & 2) == 0 &&
@@ -9207,8 +10121,8 @@ namespace selvy {
 
 			static std::unordered_map<std::wstring, std::vector<std::tuple<std::wstring, std::wstring, std::wstring>>>
 				extract_items_unit_results(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size, const std::vector<std::pair<cv::Rect, std::wstring>>& lot_numbers, const std::vector<std::pair<cv::Rect, std::wstring>>& dates)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, const std::vector<std::pair<cv::Rect, std::wstring>>& lot_numbers, const std::vector<std::pair<cv::Rect, std::wstring>>& dates)
 			{
 				std::unordered_map<std::wstring, std::vector<std::tuple<std::wstring, std::wstring, std::wstring>>> ret;
 				auto inner_lot = lot_numbers;
@@ -9356,7 +10270,7 @@ namespace selvy {
 					if (category == L"BASF") {
 						item_values = extract_field_values(items, blocks,
 							std::bind(find_coa_nearest_down_words2, std::placeholders::_1, std::placeholders::_2, hitting_threshold, expanded_ratio,
-							cutting_ratio, multi_line, merge, expand_both_sides, next_line_ratio, restrict_right, restrict_ratio),
+								cutting_ratio, multi_line, merge, expand_both_sides, next_line_ratio, restrict_right, restrict_ratio),
 							default_preprocess,
 							default_extract,
 							default_postprocess);
@@ -9365,7 +10279,7 @@ namespace selvy {
 					else {
 						item_values = extract_field_values(items, blocks,
 							std::bind(find_coa_nearest_down_words, std::placeholders::_1, std::placeholders::_2, hitting_threshold, expanded_ratio,
-							cutting_ratio, multi_line, merge, expand_both_sides, next_line_ratio, restrict_right, restrict_ratio),
+								cutting_ratio, multi_line, merge, expand_both_sides, next_line_ratio, restrict_right, restrict_ratio),
 							default_preprocess,
 							default_extract,
 							default_postprocess);
@@ -9628,12 +10542,12 @@ namespace selvy {
 							continue;
 						}
 						else if (std::get<1>(item).compare(result.second) == 0 ||
-								 std::get<1>(item).compare(unit.second) == 0 ||
-								 unit.second.compare(result.second) == 0) {
+							std::get<1>(item).compare(unit.second) == 0 ||
+							unit.second.compare(result.second) == 0) {
 							continue;
 						}
 						else if (coll_result.width > std::min(item_rect.width, result.first.width) * 0.8 ||
-								 coll_unit.width > std::min(item_rect.width, unit.first.width) * 0.8) {
+							coll_unit.width > std::min(item_rect.width, unit.first.width) * 0.8) {
 							continue;
 						}
 						ret_items.push_back(std::get<1>(item));
@@ -9711,9 +10625,9 @@ namespace selvy {
 						}
 					}
 				}
-				else if (category == L"SKGC"){
+				else if (category == L"SKGC") {
 					int size = ret_items.size();
-					std::vector<std::wstring> unit_regex = { L"%$", L"ppm$", L"KO[HUI]{1,2}/g$"};
+					std::vector<std::wstring> unit_regex = { L"%$", L"ppm$", L"KO[HUI]{1,2}/g$" };
 					std::vector<std::wstring> unit_str = { L"%", L"ppm", L"KOH/g" };
 					for (int i = 0; i < size; ++i) {
 						int before = ret_items[i].length();
@@ -9729,8 +10643,8 @@ namespace selvy {
 				}
 				else if (category == L"WEIHAI") {
 					int size = ret_items.size();
-					std::vector<std::wstring> unit_regex = { L"[,， ]{0,2}[％%]$", L"[,， ]{0,2}g/ml$"};
-					std::vector<std::wstring> unit_str = { L"%", L"g/ml"};
+					std::vector<std::wstring> unit_regex = { L"[,， ]{0,2}[％%]$", L"[,， ]{0,2}g/ml$" };
+					std::vector<std::wstring> unit_str = { L"%", L"g/ml" };
 					for (int i = 0; i < size; ++i) {
 						int before = ret_items[i].length();
 						for (int u_i = 0; u_i < unit_regex.size(); ++u_i) {
@@ -9982,7 +10896,7 @@ namespace selvy {
 			}
 		};
 
-		class court_document_recognizer : public recognizer
+		class entrust_document_recognizer : public recognizer
 		{
 		public:
 			std::pair<std::wstring, int>
@@ -10002,12 +10916,16 @@ namespace selvy {
 			{
 				throw std::logic_error("not implmented");
 			}
-
+			std::pair<std::unordered_map<std::wstring, std::wstring>, std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>>
+				recognize(const boost::filesystem::path& path, const std::string& secret, const int ignore) override
+			{
+				throw std::logic_error("not implmented");
+			}
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
 				recognize(const boost::filesystem::path& path,
-				const std::wstring& class_name) override
+					const std::wstring& class_name) override
 			{
-				const auto configuration = load_configuration(L"court");
+				const auto configuration = load_configuration(L"entrust");
 
 				std::unordered_map<std::wstring, std::vector<std::unordered_map<std::wstring, std::vector<std::wstring>>>> fields;
 
@@ -10062,7 +10980,7 @@ namespace selvy {
 					CComPtr<FREngine::IEngineLoader> loader;
 					FREngine::IEnginePtr engine;
 #if __USE_ENGINE__
-					std::tie(loader, engine) = get_engine_object(configuration);
+					std::tie(loader, engine) = get_engine_object(configuration, false);
 #endif
 					// for (auto i = range.start; i < range.end; i++) {
 					for (auto i = 0; i < files.size(); i++) {
@@ -10129,22 +11047,28 @@ namespace selvy {
 
 
 						if (class_name == L"document") {
-							auto court_name = extract_court_name(configuration, class_name, searched_fields, blocks, image_size);
-							auto event_name = extract_event_name(configuration, class_name, searched_fields, blocks, image_size);
-							auto creditor_name = extract_creditor_name(configuration, class_name, searched_fields, blocks, image_size);
-							auto debtor_name = extract_debtor_name(configuration, class_name, searched_fields, blocks, image_size);
-							auto debtor_other_name = extract_debtor_other_name(configuration, class_name, searched_fields, blocks, image_size);
-							auto price_name = extract_price_name(configuration, class_name, searched_fields, blocks, image_size);
-							auto judge_name = extract_judge_name(configuration, class_name, searched_fields, blocks, image_size);
-							extract_extra_fields(configuration, class_name, searched_fields, blocks, creditor_name, debtor_name, debtor_other_name, image_size);
+							auto issuing_entity = extract_basic(configuration, class_name, searched_fields, blocks, image_size, L"발행기관");
+							auto account_number = extract_basic(configuration, class_name, searched_fields, blocks, image_size, L"계좌번호");
+							auto product_name = extract_basic(configuration, class_name, searched_fields, blocks, image_size, L"상품명");
+							auto purchase_date = extract_basic(configuration, class_name, searched_fields, blocks, image_size, L"매수일자");
+							auto purchase_amount = extract_basic(configuration, class_name, searched_fields, blocks, image_size, L"매수금액");
+							auto investment_period = extract_basic(configuration, class_name, searched_fields, blocks, image_size, L"투자기간");
+							auto interest_rate = extract_basic(configuration, class_name, searched_fields, blocks, image_size, L"이율(연)");
+							auto repay_interest = extract_basic(configuration, class_name, searched_fields, blocks, image_size, L"상환이자");
+							auto repay_amount = extract_basic(configuration, class_name, searched_fields, blocks, image_size, L"상환금액");
 
-							fill_field(extracted_fields, L"COURT NAME", court_name);
-							fill_field(extracted_fields, L"EVENT", event_name);
-							fill_field(extracted_fields, L"CREDITOR", creditor_name);
-							fill_field(extracted_fields, L"DEBTOR", debtor_name);
-							fill_field(extracted_fields, L"DEBTOR_OTHER", debtor_other_name);
-							fill_field(extracted_fields, L"PRICE", price_name);
-							fill_field(extracted_fields, L"JUDGE", judge_name);
+							//extract_extra_fields(configuration, class_name, searched_fields, blocks, creditor_name, debtor_name, debtor_other_name, image_size);
+
+							//L"발행기관", L"계좌번호", L"상품명", L"매수일자", L"매수금액", L"투자기간", L"이율(연)",L"상환이자",L"상환금액"
+							fill_field(extracted_fields, L"발행기관", issuing_entity);
+							fill_field(extracted_fields, L"계좌번호", account_number);
+							fill_field(extracted_fields, L"상품명", product_name);
+							fill_field(extracted_fields, L"매수일자", purchase_date);
+							fill_field(extracted_fields, L"매수금액", purchase_amount);
+							fill_field(extracted_fields, L"투자기간", investment_period);
+							fill_field(extracted_fields, L"이율(연)", interest_rate);
+							fill_field(extracted_fields, L"상환이자", repay_interest);
+							fill_field(extracted_fields, L"상환금액", repay_amount);
 
 #if defined(GET_IMAGE_)
 							const auto new_dir = OUTPUT_FOLDER + path.stem().native();
@@ -10170,13 +11094,16 @@ namespace selvy {
 						txt_file << L"- 파일 : " << files[i] << std::endl;
 						txt_file << L"- 분류 : " << class_name << std::endl;
 
-						txt_file << "- " << L"법원" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"COURT NAME"), L",") << std::endl;
-						txt_file << "- " << L"사건" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"EVENT"), L",") << std::endl;
-						txt_file << "- " << L"채권자" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"CREDITOR"), L",") << std::endl;
-						txt_file << "- " << L"채무자" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"DEBTOR"), L",") << std::endl;
-						txt_file << "- " << L"제3채무자" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"DEBTOR_OTHER"), L",") << std::endl;
-						txt_file << "- " << L"청구금액" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"PRICE"), L",") << std::endl;
-						txt_file << "- " << L"판사" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"JUDGE"), L",") << std::endl;
+						//L"발행기관", L"계좌번호", L"상품명", L"매수일자", L"매수금액", L"투자기간", L"이율(연)",L"상환이자",L"상환금액"
+						txt_file << "- " << L"발행기관" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"발행기관"), L",") << std::endl;
+						txt_file << "- " << L"계좌번호" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"계좌번호"), L",") << std::endl;
+						txt_file << "- " << L"상품명" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"상품명"), L",") << std::endl;
+						txt_file << "- " << L"매수일자" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"매수일자"), L",") << std::endl;
+						txt_file << "- " << L"제3매수금액" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"매수금액"), L",") << std::endl;
+						txt_file << "- " << L"투자기간" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"투자기간"), L",") << std::endl;
+						txt_file << "- " << L"이율(연)" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"이율(연)"), L",") << std::endl;
+						txt_file << "- " << L"상환이자" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"상환이자"), L",") << std::endl;
+						txt_file << "- " << L"상환금액" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"상환금액"), L",") << std::endl;
 						txt_file.close();
 #endif
 
@@ -10193,7 +11120,7 @@ namespace selvy {
 					}
 
 #if __USE_ENGINE__
-					release_engine_object(std::make_pair(loader, engine));
+					release_engine_object(std::make_pair(loader, engine), false);
 #endif
 					// } , std::stoi(configuration.at(L"engine").at(L"concurrency")));
 				}
@@ -10261,7 +11188,7 @@ namespace selvy {
 
 			static std::vector<std::vector<std::pair<cv::Rect, std::wstring>>>
 				split_fields(std::vector<std::pair<cv::Rect, std::wstring>>& fields,
-							 const std::function<bool(const std::pair<cv::Rect, std::wstring>& a, std::pair<cv::Rect, std::wstring>& b)>& condition) {
+					const std::function<bool(const std::pair<cv::Rect, std::wstring>& a, std::pair<cv::Rect, std::wstring>& b)>& condition) {
 				std::vector<std::set<int>> connect_info;
 				for (int i = 0; i < fields.size(); ++i) {
 					std::set<int> temp;
@@ -10351,8 +11278,8 @@ namespace selvy {
 
 			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_court_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"COURT NAME") == fields.end())
 					return std::vector<std::pair<cv::Rect, std::wstring>>();
@@ -10375,8 +11302,8 @@ namespace selvy {
 
 			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_event_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"EVENT") == fields.end())
 					return std::vector<std::pair<cv::Rect, std::wstring>>();
@@ -10385,10 +11312,10 @@ namespace selvy {
 				std::vector<std::pair<cv::Rect, std::wstring>> ret_items;
 
 				product_name = extract_field_values_2(fields.at(L"EVENT"), blocks,
-					{
-						std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
-						std::bind(filter_search, std::placeholders::_1, std::placeholders::_2)
-					},
+				{
+					std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+					std::bind(filter_search, std::placeholders::_1, std::placeholders::_2)
+				},
 					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
 					default_preprocess,
 					default_extract,
@@ -10396,10 +11323,10 @@ namespace selvy {
 
 				if (product_name.empty()) {
 					product_name = extract_field_values_2(fields.at(L"EVENT"), blocks,
-						{
-							std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
-							std::bind(filter_search_2, std::placeholders::_1, std::placeholders::_2)
-						},
+					{
+						std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+						std::bind(filter_search_2, std::placeholders::_1, std::placeholders::_2)
+					},
 						search_self,
 						default_preprocess,
 						default_extract,
@@ -10431,8 +11358,8 @@ namespace selvy {
 
 			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_creditor_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"CREDITOR") == fields.end())
 					return std::vector<std::pair<cv::Rect, std::wstring>>();
@@ -10441,8 +11368,8 @@ namespace selvy {
 				std::vector<std::pair<cv::Rect, std::wstring>> ret_items;
 
 				product_name = extract_field_values_2(fields.at(L"CREDITOR"), blocks,
-					{	std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false) ,
-						std::bind(filter_search, std::placeholders::_1, std::placeholders::_2) },
+				{ std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false) ,
+					std::bind(filter_search, std::placeholders::_1, std::placeholders::_2) },
 					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
 					default_preprocess,
 					default_extract,
@@ -10454,10 +11381,10 @@ namespace selvy {
 						std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
 						std::bind(filter_search_2, std::placeholders::_1, std::placeholders::_2)
 					},
-					search_self,
-					default_preprocess,
-					default_extract,
-					default_postprocess);
+						search_self,
+						default_preprocess,
+						default_extract,
+						default_postprocess);
 				}
 
 
@@ -10501,8 +11428,8 @@ namespace selvy {
 
 			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_debtor_other_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"DEBTOR_OTHER") == fields.end())
 					return std::vector<std::pair<cv::Rect, std::wstring>>();
@@ -10511,9 +11438,9 @@ namespace selvy {
 				std::vector<std::pair<cv::Rect, std::wstring>> ret_items;
 
 				product_name = extract_field_values_2(fields.at(L"DEBTOR_OTHER"), blocks,
-					{	std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
-						std::bind(filter_search, std::placeholders::_1, std::placeholders::_2)
-					},
+				{ std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+					std::bind(filter_search, std::placeholders::_1, std::placeholders::_2)
+				},
 					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
 					default_preprocess,
 					default_extract,
@@ -10525,10 +11452,10 @@ namespace selvy {
 						std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
 						std::bind(filter_search_2, std::placeholders::_1, std::placeholders::_2)
 					},
-					search_self,
-					default_preprocess,
-					default_extract,
-					default_postprocess);
+						search_self,
+						default_preprocess,
+						default_extract,
+						default_postprocess);
 				}
 
 
@@ -10564,8 +11491,8 @@ namespace selvy {
 
 			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_debtor_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"DEBTOR") == fields.end())
 					return std::vector<std::pair<cv::Rect, std::wstring>>();
@@ -10578,10 +11505,10 @@ namespace selvy {
 					std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
 					std::bind(filter_search, std::placeholders::_1, std::placeholders::_2)
 				},
-				std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
-				default_preprocess,
-				default_extract,
-				default_postprocess);
+					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					default_postprocess);
 
 				if (product_name.empty()) {
 					product_name = extract_field_values_2(fields.at(L"DEBTOR"), blocks,
@@ -10589,10 +11516,10 @@ namespace selvy {
 						std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
 						std::bind(filter_search_2, std::placeholders::_1, std::placeholders::_2)
 					},
-					search_self,
-					default_preprocess,
-					default_extract,
-					default_postprocess);
+						search_self,
+						default_preprocess,
+						default_extract,
+						default_postprocess);
 				}
 
 
@@ -10628,8 +11555,8 @@ namespace selvy {
 
 			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_price_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"PRICE") == fields.end())
 					return std::vector<std::pair<cv::Rect, std::wstring>>();
@@ -10638,24 +11565,24 @@ namespace selvy {
 
 				product_name = extract_field_values(fields.at(L"PRICE"), blocks,
 					std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-					court_document_recognizer::preprocess_price,
+					entrust_document_recognizer::preprocess_price,
 					create_extract_function(L"([금]{0,1} ?.* ?[원])"),
-					court_document_recognizer::postprocess_price);
+					entrust_document_recognizer::postprocess_price);
 
 				if (product_name.empty()) {
 					product_name = extract_field_values(fields.at(L"PRICE"), blocks,
 						search_self,
-						court_document_recognizer::preprocess_price,
+						entrust_document_recognizer::preprocess_price,
 						create_extract_function(L"([금]{0,1} ?.* ?[원])"),
-						court_document_recognizer::postprocess_price);
+						entrust_document_recognizer::postprocess_price);
 				}
 
 				if (product_name.empty()) {
 					product_name = extract_field_values(fields.at(L"PRICE"), blocks,
 						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 8.0, 100, true),
-						court_document_recognizer::preprocess_price,
+						entrust_document_recognizer::preprocess_price,
 						create_extract_function(L"([금]{0,1} ?.* ?[원])"),
-						court_document_recognizer::postprocess_price);
+						entrust_document_recognizer::postprocess_price);
 
 					std::sort(std::begin(product_name), std::end(product_name),
 						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
@@ -10668,11 +11595,11 @@ namespace selvy {
 				if (product_name.empty()) {
 					product_name = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 						std::make_tuple(cv::Rect(), L"", cv::Range())
-						}, blocks,
+					}, blocks,
 						default_search,
-						court_document_recognizer::preprocess_price,
-						create_extract_function(L"([금]{0,1} ?.* ?[원])"),
-						court_document_recognizer::postprocess_price);
+							entrust_document_recognizer::preprocess_price,
+							create_extract_function(L"([금]{0,1} ?.* ?[원])"),
+							entrust_document_recognizer::postprocess_price);
 
 					std::sort(std::begin(product_name), std::end(product_name),
 						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
@@ -10690,42 +11617,42 @@ namespace selvy {
 			}
 
 			static std::vector<std::pair<cv::Rect, std::wstring>>
-				extract_judge_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+				extract_basic(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
 			{
-				if (fields.find(L"JUDGE") == fields.end())
+				if (fields.find(field_name) == fields.end())
 					return std::vector<std::pair<cv::Rect, std::wstring>>();
 
-				std::vector<std::pair<cv::Rect, std::wstring>> product_name;
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
 
-				product_name = extract_field_values(fields.at(L"JUDGE"), blocks,
+				found = extract_field_values(fields.at(field_name), blocks,
 					std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 					default_preprocess,
 					default_extract,
-					court_document_recognizer::postprocess_judge);
+					default_postprocess);
 
-				if (product_name.empty()) {
-					product_name = extract_field_values(fields.at(L"JUDGE"), blocks,
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
 						search_self,
 						default_preprocess,
 						default_extract,
-						court_document_recognizer::postprocess_judge);
+						default_postprocess);
 				}
 
 				//if (product_name.size() > 0) {
 				//	product_name.erase(product_name.begin() + 1, product_name.end());
 				//}
 
-				return product_name;
+				return found;
 			}
 
 			static std::tuple<cv::Rect, cv::Rect, cv::Rect>
 				createExtraRects(std::vector<std::pair<cv::Rect, std::wstring>>& creditor,
-								 std::vector<std::pair<cv::Rect, std::wstring>>& debtors,
-								 std::vector<std::pair<cv::Rect, std::wstring>>& debtor_others)
+					std::vector<std::pair<cv::Rect, std::wstring>>& debtors,
+					std::vector<std::pair<cv::Rect, std::wstring>>& debtor_others)
 			{
-				cv::Rect extra_creditor(0, 0, 0 ,0);
+				cv::Rect extra_creditor(0, 0, 0, 0);
 				cv::Rect extra_debtors(0, 0, 0, 0);
 				cv::Rect extra_debtor_others(0, 0, 0, 0);
 
@@ -10833,12 +11760,2988 @@ namespace selvy {
 
 			static void
 				extract_extra_fields(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks,
-				std::vector<std::pair<cv::Rect, std::wstring>>& creditor,
-				std::vector<std::pair<cv::Rect, std::wstring>>& debtors,
-				std::vector<std::pair<cv::Rect, std::wstring>>& debtor_others,
-				const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks,
+					std::vector<std::pair<cv::Rect, std::wstring>>& creditor,
+					std::vector<std::pair<cv::Rect, std::wstring>>& debtors,
+					std::vector<std::pair<cv::Rect, std::wstring>>& debtor_others,
+					const cv::Size& image_size)
+			{
+				auto rects = createExtraRects(creditor, debtors, debtor_others);
+				auto extra_creditors = find_area_lines(std::make_tuple(std::get<0>(rects), L"", cv::Range(0, 0)), blocks, 0.8);
+				auto extra_debtors = find_area_lines(std::make_tuple(std::get<1>(rects), L"", cv::Range(0, 0)), blocks, 0.8);
+				auto extra_debtor_others = find_area_lines(std::make_tuple(std::get<2>(rects), L"", cv::Range(0, 0)), blocks, 0.8);
+
+				boost::remove_erase_if(extra_creditors, [](const std::pair<cv::Rect, std::wstring>& name) {
+					return !boost::regex_search(std::get<1>(name), boost::wregex(L"^.?[0-9]", boost::regex_constants::icase)); });
+				boost::remove_erase_if(extra_debtors, [](const std::pair<cv::Rect, std::wstring>& name) {
+					return !boost::regex_search(std::get<1>(name), boost::wregex(L"^.?[0-9]", boost::regex_constants::icase)); });
+				boost::remove_erase_if(extra_debtor_others, [](const std::pair<cv::Rect, std::wstring>& name) {
+					return !boost::regex_search(std::get<1>(name), boost::wregex(L"^.?[0-9]", boost::regex_constants::icase)); });
+
+				extract_extra_field(creditor, extra_creditors);
+				extract_extra_field(debtors, extra_debtors);
+				extract_extra_field(debtor_others, extra_debtor_others);
+			}
+
+		};
+
+		//퇴직,연금
+		class retirement_document_recognizer : public recognizer
+		{
+		public:
+			std::pair<std::wstring, int>
+				recognize(const std::string& buffer, int languages, const std::string& secret) override
+			{
+				throw std::logic_error("not implmented");
+			}
+
+			std::pair<std::wstring, int>
+				recognize(const std::string& buffer, const std::wstring& type, const std::string& secret) override
+			{
+				throw std::logic_error("not implmented");
+			}
+
+			std::unordered_map<std::wstring, std::vector<std::wstring>>
+				recognize(const boost::filesystem::path& path, const std::string& secret) override
+			{
+				throw std::logic_error("not implmented");
+			}
+			std::pair<std::unordered_map<std::wstring, std::wstring>, std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>>
+				recognize(const boost::filesystem::path& path, const std::string& secret, const int ignore) override
+			{
+				throw std::logic_error("not implmented");
+			}
+			std::unordered_map<std::wstring, std::vector<std::wstring>>
+				recognize(const boost::filesystem::path& path,
+					const std::wstring& class_name) override
+			{
+				const auto configuration = load_configuration(L"retirement");
+
+				std::unordered_map<std::wstring, std::vector<std::unordered_map<std::wstring, std::vector<std::wstring>>>> fields;
+
+				std::mutex locks;
+				const auto fill_field = [&locks](std::unordered_map<std::wstring, std::vector<std::wstring>>& fields, const std::wstring& field,
+					const std::vector<std::pair<cv::Rect, std::wstring>>& value) {
+					locks.lock();
+					if (!value.empty()) {
+						std::vector<std::wstring> insert_value;
+						std::transform(std::begin(value), std::end(value), std::back_inserter(insert_value), [](const std::pair<cv::Rect, std::wstring>& line) {
+							return std::get<1>(line);
+						});
+						fields.emplace(std::make_pair(field, insert_value));
+					}
+					locks.unlock();
+				};
+
+				std::vector<std::wstring> files;
+				if (boost::filesystem::is_directory(path)) {
+					for (auto& entry : boost::filesystem::recursive_directory_iterator(path)) {
+						const auto file = entry.path();
+						const auto extension = boost::algorithm::to_lower_copy(file.extension().native());
+
+						if (extension != L".png" && extension != L".jpg" && extension != L".tif" && extension != L".pdf")
+							continue;
+
+						files.emplace_back(boost::filesystem::absolute(file).native());
+					}
+
+					std::sort(std::begin(files), std::end(files), compareNat);
+				}
+				else {
+					const auto extension = boost::algorithm::to_lower_copy(path.extension().native());
+
+					if (extension != L".png" && extension != L".jpg" && extension != L".tif" && extension != L".pdf")
+						return std::unordered_map<std::wstring, std::vector<std::wstring>>();
+
+					files.emplace_back(boost::filesystem::absolute(path).native());
+				}
+
+				std::unordered_map<std::wstring, std::vector<std::wstring>> extracted_fields;
+
+#ifdef LOG_USE_WOFSTREAM
+				std::wofstream txt_file, res_file;
+				txt_file.imbue(std::locale(std::locale::empty(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::generate_header>));
+				txt_file.open(__LOG_FILE_NAME__, std::wofstream::out | std::wofstream::app);
+				res_file.imbue(std::locale(std::locale::empty(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::generate_header>));
+				res_file.open(__RES_FILE_NAME__, std::wofstream::out | std::wofstream::app);
+#endif
+
+				try {
+					// cv::parallel_for_(cv::Range(0, files.size()), [&](const cv::Range& range) {
+
+					CComPtr<FREngine::IEngineLoader> loader;
+					FREngine::IEnginePtr engine;
+#if __USE_ENGINE__
+					std::tie(loader, engine) = get_engine_object(configuration, false);
+#endif
+					// for (auto i = range.start; i < range.end; i++) {
+					for (auto i = 0; i < files.size(); i++) {
+						memory_reader memory_reader(boost::filesystem::absolute(files[i]), "");
+
+						FREngine::IFRDocumentPtr document;
+#if __USE_ENGINE__
+						document = engine->CreateFRDocument();
+						document->AddImageFileFromStream(&memory_reader, nullptr, nullptr, nullptr,
+							boost::filesystem::path(files[i]).filename().native().c_str());
+
+						auto page_preprocessing_params = engine->CreatePagePreprocessingParams();
+						page_preprocessing_params->CorrectOrientation = ORIENTATION_VALUE;
+						page_preprocessing_params->OrientationDetectionParams->put_OrientationDetectionMode(FREngine::OrientationDetectionModeEnum::ODM_Thorough);
+						document->Preprocess(page_preprocessing_params, nullptr, nullptr, nullptr);
+
+						if (document->Pages->Count < 1) {
+							document->Close();
+							continue;
+						}
+#endif
+
+#ifdef LOG_USE_WOFSTREAM
+						txt_file << L"-----------------------------------------------------" << std::endl;
+						txt_file << L"File : " << files[i] << std::endl;
+
+#endif
+
+						if (class_name.empty()) {
+#ifdef __USE_ENGINE__
+							document->Close();
+#endif
+							continue;
+						}
+
+						const std::set<std::wstring> processed_class_names{
+							L"INCOME", L"PENSION", L"SMALL", L"MIDDLE",
+						};
+
+						// 인식할 필요가 없는 문서는 pass
+						if (processed_class_names.find(class_name) == processed_class_names.end()) {
+							document->Close();
+							continue;
+						}
+
+						std::vector<block> blocks;
+						cv::Size image_size;
+						std::tie(blocks, std::ignore, image_size) = recognize_document(engine, configuration, class_name, files[i], document);
+						if (image_size.area() == 0)
+							image_size = estimate_paper_size(blocks);
+
+#if defined(GET_IMAGE_)
+						auto temp_image = cv::imread("TEMP_GRAY.png");
+#else
+						cv::Mat temp_image;
+#endif
+
+#if __USE_ENGINE__
+						document->Close();
+#endif
+
+						const auto keywords = get_keywords(configuration, keywords_, class_name);
+						const auto searched_fields = search_fields(class_name, keywords, blocks);
+
+
+
+						if (class_name == L"INCOME_ORIGINAL") { //찾은 필드를 가지고 다른 필드 찾기 //찾은 필드 rect 위치로 필터
+
+							auto cor_reg_number = extract_company_number(configuration, class_name, searched_fields, blocks, image_size, L"사업자번호");
+							auto company_name = extract_company_name(configuration, class_name, searched_fields, blocks, image_size, L"법인명");
+							auto representative = extract_representation(configuration, class_name, searched_fields, blocks, image_size, L"대표자");
+							auto retire_reason = extract_basic_rightward(configuration, class_name, searched_fields, blocks, image_size, L"퇴직사유");
+
+							retire_reason.clear();
+							auto retire_pay = extract_retirement_pay(configuration, class_name, searched_fields, blocks, image_size, L"퇴직급여");
+							std::vector<std::pair<cv::Rect, std::wstring>> enter_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> value_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> retire_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> pay_date;
+
+							auto standard_date = extract_basic_date(configuration, class_name, searched_fields, blocks, image_size, L"최종근속연수");
+							if (standard_date.size() >= 4) {
+								enter_date.emplace_back(standard_date.at(0));
+								value_date.emplace_back(standard_date.at(1));
+								retire_date.emplace_back(standard_date.at(2));
+								pay_date.emplace_back(standard_date.at(3));
+							}
+							else {
+								enter_date = extract_basic_downward_date(configuration, class_name, searched_fields, blocks, image_size, L"입사일");
+								value_date = extract_basic_downward_date(configuration, class_name, searched_fields, blocks, image_size, L"기산일");
+								retire_date = extract_basic_downward_date(configuration, class_name, searched_fields, blocks, image_size, L"퇴사일");
+								pay_date = extract_basic_downward_date(configuration, class_name, searched_fields, blocks, image_size, L"지급일");
+							}
+							auto account_number = extract_basic_downward(configuration, class_name, searched_fields, blocks, image_size, L"계좌번호");
+							auto deposit_amount = extract_basic_downward(configuration, class_name, searched_fields, blocks, image_size, L"계좌입금금액");
+
+							if (!account_number.empty() || !deposit_amount.empty())
+							{
+								retire_pay.clear();
+								cor_reg_number.clear();
+							}
+
+							//extract_extra_fields(configuration, class_name, searched_fields, blocks, creditor_name, debtor_name, debtor_other_name, image_size);
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							fill_field(extracted_fields, L"사업자번호", cor_reg_number);
+							fill_field(extracted_fields, L"법인명", company_name);
+							fill_field(extracted_fields, L"대표자", representative);
+							fill_field(extracted_fields, L"퇴직사유", retire_reason);
+							fill_field(extracted_fields, L"퇴직급여", retire_pay);
+							fill_field(extracted_fields, L"입사일", enter_date);
+							fill_field(extracted_fields, L"기산일", value_date);
+							fill_field(extracted_fields, L"퇴사일", retire_date);
+							fill_field(extracted_fields, L"지급일", pay_date);
+							fill_field(extracted_fields, L"계좌번호", account_number);
+							fill_field(extracted_fields, L"계좌입금금액", deposit_amount);
+
+#ifdef LOG_USE_WOFSTREAM            // 문서단위 결과
+							const auto text = to_wstring(blocks);
+							txt_file << L"ALL : " << std::endl;
+							txt_file << text << std::endl << std::endl;
+
+							txt_file << L"- 파일 : " << files[i] << std::endl;
+							txt_file << L"- 분류 : " << class_name << std::endl;
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							txt_file << "- " << L"사업자번호" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"사업자번호"), L",") << std::endl;
+							txt_file << "- " << L"법인명" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"법인명"), L",") << std::endl;
+							txt_file << "- " << L"대표자" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"대표자"), L",") << std::endl;
+							txt_file << "- " << L"퇴직사유" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"퇴직사유"), L",") << std::endl;
+							txt_file << "- " << L"퇴직급여" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"퇴직급여"), L",") << std::endl;
+							txt_file << "- " << L"입사일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"입사일"), L",") << std::endl;
+							txt_file << "- " << L"기산일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"기산일"), L",") << std::endl;
+							txt_file << "- " << L"퇴사일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"퇴사일"), L",") << std::endl;
+							txt_file << "- " << L"지급일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"지급일"), L",") << std::endl;
+							txt_file << "- " << L"계좌번호" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"계좌번호"), L",") << std::endl;
+							txt_file << "- " << L"계좌입금금액" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"계좌입금금액"), L",") << std::endl;
+							txt_file.close();
+#endif
+						}
+						else if (class_name == L"INCOME") { //찾은 필드를 가지고 다른 필드 찾기 //찾은 필드 rect 위치로 필터
+															//tyler
+
+							auto cor_reg_number = extract_company_number(configuration, class_name, searched_fields, blocks, image_size, L"사업자번호");
+							std::vector<std::pair<cv::Rect, std::wstring>> cor_reg_number_top;
+							std::vector<std::pair<cv::Rect, std::wstring>> cor_reg_number_bottom;
+							std::vector<std::pair<cv::Rect, std::wstring>> company_name;
+							std::vector<std::pair<cv::Rect, std::wstring>> retire_pay;
+							if (cor_reg_number.size() == 2) {
+								cor_reg_number_top.emplace_back(cor_reg_number.at(0));
+								cor_reg_number_top.at(0).first.y = cor_reg_number_top.at(0).first.y - cor_reg_number_top.at(0).first.height*0.3;
+								cor_reg_number_bottom.emplace_back(cor_reg_number.at(1));
+							}
+							else if (cor_reg_number.size() == 1)
+							{
+								int top_down = cor_reg_number.at(0).first.y;
+								int middle_up = image_size.height*0.5 - cor_reg_number.at(0).first.y;
+
+								if (top_down*1.5 < middle_up) {
+									cor_reg_number_top = cor_reg_number;
+									cor_reg_number_top.at(0).first.y = cor_reg_number_top.at(0).first.y - cor_reg_number_top.at(0).first.height*0.3;
+								}
+								else
+								{
+									if (cor_reg_number.at(0).first.x + cor_reg_number.at(0).first.width*0.5 > image_size.width*0.5)
+										cor_reg_number_bottom = cor_reg_number;
+									else
+										cor_reg_number.clear();
+								}
+							}
+
+							auto representative = extract_representation_2(configuration, class_name, searched_fields, blocks, image_size, L"대표자", cor_reg_number_top, 3, 1);
+							company_name = extract_company_name_2(configuration, class_name, searched_fields, blocks, image_size, L"법인명", cor_reg_number_bottom, 0, 1);
+							if (company_name.empty())
+							{
+								company_name = extract_company_name_2(configuration, class_name, searched_fields, blocks, image_size, L"법인명", cor_reg_number_top, 3, 1);
+							}
+							retire_pay = extract_retirement_pay_2(configuration, class_name, searched_fields, blocks, image_size, L"퇴직급여", cor_reg_number_bottom, 1, 1);
+
+							//날짜 rect.y는 입사일/기산일/퇴사일/지급일 rect.y + 1/2h 보다 커야함
+
+
+							auto retire_reason = extract_basic_rightward(configuration, class_name, searched_fields, blocks, image_size, L"퇴직사유");
+							retire_reason.clear();
+
+							std::vector<std::pair<cv::Rect, std::wstring>> enter_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> value_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> retire_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> pay_date;
+
+							enter_date = extract_enter_date(configuration, class_name, searched_fields, blocks, image_size, L"입사일", cor_reg_number_bottom, 2, 1);
+
+							for (int i = 0; i < enter_date.size(); i++)
+							{
+								enter_date.at(i).second = retirement_document_recognizer::postprocess_date(enter_date.at(i).second);
+							}
+							//value_date = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"기산일", enter_date, 3, 1);
+							//retire_date = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"퇴사일", value_date, 3, 1);
+							//pay_date = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"지급일", retire_date, 3, 1);
+
+							auto account_number = extract_basic_downward(configuration, class_name, searched_fields, blocks, image_size, L"계좌번호");
+							auto deposit_amount = extract_basic_downward(configuration, class_name, searched_fields, blocks, image_size, L"계좌입금금액");
+
+							/*if (!account_number.empty() || !deposit_amount.empty())
+							{
+							retire_pay.clear();
+							cor_reg_number.clear();
+							}*/
+
+							//extract_extra_fields(configuration, class_name, searched_fields, blocks, creditor_name, debtor_name, debtor_other_name, image_size);
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							if (cor_reg_number.size() == 2)
+							{
+								cor_reg_number.pop_back();
+							}
+
+							fill_field(extracted_fields, L"사업자번호", cor_reg_number);
+							fill_field(extracted_fields, L"법인명", company_name);
+							fill_field(extracted_fields, L"대표자", representative);
+							fill_field(extracted_fields, L"퇴직사유", retire_reason);
+							fill_field(extracted_fields, L"퇴직급여", retire_pay);
+							fill_field(extracted_fields, L"입사일", enter_date);
+							fill_field(extracted_fields, L"기산일", value_date);
+							fill_field(extracted_fields, L"퇴사일", retire_date);
+							fill_field(extracted_fields, L"지급일", pay_date);
+							fill_field(extracted_fields, L"계좌번호", account_number);
+							fill_field(extracted_fields, L"계좌입금금액", deposit_amount);
+
+#ifdef LOG_USE_WOFSTREAM            // 문서단위 결과
+							const auto text = to_wstring(blocks);
+							txt_file << L"ALL : " << std::endl;
+							txt_file << text << std::endl << std::endl;
+
+							txt_file << L"- 파일 : " << files[i] << std::endl;
+							txt_file << L"- 분류 : " << class_name << std::endl;
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							txt_file << "- " << L"사업자번호" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"사업자번호"), L",") << std::endl;
+							txt_file << "- " << L"법인명" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"법인명"), L",") << std::endl;
+							txt_file << "- " << L"대표자" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"대표자"), L",") << std::endl;
+							txt_file << "- " << L"퇴직사유" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"퇴직사유"), L",") << std::endl;
+							txt_file << "- " << L"퇴직급여" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"퇴직급여"), L",") << std::endl;
+							txt_file << "- " << L"입사일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"입사일"), L",") << std::endl;
+							txt_file << "- " << L"기산일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"기산일"), L",") << std::endl;
+							txt_file << "- " << L"퇴사일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"퇴사일"), L",") << std::endl;
+							txt_file << "- " << L"지급일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"지급일"), L",") << std::endl;
+							txt_file << "- " << L"계좌번호" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"계좌번호"), L",") << std::endl;
+							txt_file << "- " << L"계좌입금금액" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"계좌입금금액"), L",") << std::endl;
+							txt_file.close();
+#endif
+						}
+						else if (class_name == L"PENSION")
+						{
+							auto cor_reg_number = extract_company_number(configuration, class_name, searched_fields, blocks, image_size, L"사업자번호");
+							auto company_name = extract_company_name(configuration, class_name, searched_fields, blocks, image_size, L"근무처명");
+
+							std::vector<std::pair<cv::Rect, std::wstring>> enter_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> value_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> retire_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> pay_date;
+
+							auto standard_date = extract_basic_date(configuration, class_name, searched_fields, blocks, image_size, L"최종근속연수");
+							if (standard_date.size() >= 4) {
+								enter_date.emplace_back(standard_date.at(0));
+								value_date.emplace_back(standard_date.at(1));
+								retire_date.emplace_back(standard_date.at(2));
+								pay_date.emplace_back(standard_date.at(3));
+								enter_date.at(0).second = retirement_document_recognizer::postprocess_date_for_pension(enter_date.at(0).second);
+								value_date.at(0).second = retirement_document_recognizer::postprocess_date_for_pension(value_date.at(0).second);
+								retire_date.at(0).second = retirement_document_recognizer::postprocess_date_for_pension(retire_date.at(0).second);
+								pay_date.at(0).second = retirement_document_recognizer::postprocess_date_for_pension(pay_date.at(0).second);
+							}
+							else {
+								enter_date = extract_basic_downward_date(configuration, class_name, searched_fields, blocks, image_size, L"입사일");
+								value_date = extract_basic_downward_date(configuration, class_name, searched_fields, blocks, image_size, L"기산일");
+								retire_date = extract_basic_downward_date(configuration, class_name, searched_fields, blocks, image_size, L"퇴사일");
+								pay_date = extract_basic_downward_date(configuration, class_name, searched_fields, blocks, image_size, L"지급일");
+							}
+							auto account_number = extract_basic_downward(configuration, class_name, searched_fields, blocks, image_size, L"계좌번호");
+							auto deposit_date = extract_basic_downward(configuration, class_name, searched_fields, blocks, image_size, L"입금일");
+							if (!deposit_date.empty())
+								deposit_date.at(0).second = retirement_document_recognizer::postprocess_date_for_pension(deposit_date.at(0).second);
+							auto deposit_amount = extract_basic_downward_exp(configuration, class_name, searched_fields, blocks, image_size, L"계좌입금금액");
+
+							//extract_extra_fields(configuration, class_name, searched_fields, blocks, creditor_name, debtor_name, debtor_other_name, image_size);
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							fill_field(extracted_fields, L"사업자번호", cor_reg_number);
+							fill_field(extracted_fields, L"근무처명", company_name);
+							fill_field(extracted_fields, L"입사일", enter_date);
+							fill_field(extracted_fields, L"기산일", value_date);
+							fill_field(extracted_fields, L"퇴사일", retire_date);
+							fill_field(extracted_fields, L"지급일", pay_date);
+							fill_field(extracted_fields, L"계좌번호", account_number);
+							fill_field(extracted_fields, L"입금일", deposit_date);
+							fill_field(extracted_fields, L"계좌입금금액", deposit_amount);
+
+#ifdef LOG_USE_WOFSTREAM            // 문서단위 결과
+							const auto text = to_wstring(blocks);
+							txt_file << L"ALL : " << std::endl;
+							txt_file << text << std::endl << std::endl;
+
+							txt_file << L"- 파일 : " << files[i] << std::endl;
+							txt_file << L"- 분류 : " << class_name << std::endl;
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							txt_file << "- " << L"사업자번호" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"사업자번호"), L",") << std::endl;
+							txt_file << "- " << L"근무처명" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"근무처명"), L",") << std::endl;
+							txt_file << "- " << L"입사일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"입사일"), L",") << std::endl;
+							txt_file << "- " << L"기산일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"기산일"), L",") << std::endl;
+							txt_file << "- " << L"퇴사일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"퇴사일"), L",") << std::endl;
+							txt_file << "- " << L"지급일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"지급일"), L",") << std::endl;
+							txt_file << "- " << L"계좌번호" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"계좌번호"), L",") << std::endl;
+							txt_file << "- " << L"입금일" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"입금일"), L",") << std::endl;
+							txt_file << "- " << L"계좌입금금액" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"계좌입금금액"), L",") << std::endl;
+							txt_file.close();
+#endif
+						}
+						else if (class_name == L"SMALL")//smallcompany
+						{
+							//auto check_financial_institutions = extract_financial_institution(configuration, class_name, searched_fields, blocks, image_size, L"금융기관용");
+							auto expiry_date = extract_expiry_date(configuration, class_name, searched_fields, blocks, image_size, L"유효기간");
+							auto issue_number = extract_issue_number(configuration, class_name, searched_fields, blocks, image_size, L"발급번호");
+							auto company_name = extract_basic_rightward(configuration, class_name, searched_fields, blocks, image_size, L"업체명");
+							auto representation = extract_representation_for_small(configuration, class_name, searched_fields, blocks, image_size, L"대표자");
+							auto cor_reg_number = extract_company_number(configuration, class_name, searched_fields, blocks, image_size, L"사업자등록번호");
+							auto fund_name = extract_fund_name(configuration, class_name, searched_fields, blocks, image_size, L"자금명");
+							//auto maximum_amount = extract_basic_rightward(configuration, class_name, searched_fields, blocks, image_size, L"최대한도액");
+							//auto guarantee_name = extract_basic_rightward(configuration, class_name, searched_fields, blocks, image_size, L"담보구분");
+
+							//extract_extra_fields(configuration, class_name, searched_fields, blocks, creditor_name, debtor_name, debtor_other_name, image_size);
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							//fill_field(extracted_fields, L"금융기관용", check_financial_institutions);
+							fill_field(extracted_fields, L"유효기간", expiry_date);
+							fill_field(extracted_fields, L"발급번호", issue_number);
+							fill_field(extracted_fields, L"업체명", company_name);
+							fill_field(extracted_fields, L"대표자", representation);
+							fill_field(extracted_fields, L"사업자등록번호", cor_reg_number);
+							fill_field(extracted_fields, L"자금명", fund_name);
+							//fill_field(extracted_fields, L"최대한도액", maximum_amount);
+							//fill_field(extracted_fields, L"담보구분", guarantee_name);
+
+#ifdef LOG_USE_WOFSTREAM            // 문서단위 결과
+							const auto text = to_wstring(blocks);
+							txt_file << L"ALL : " << std::endl;
+							txt_file << text << std::endl << std::endl;
+
+							txt_file << L"- 파일 : " << files[i] << std::endl;
+							txt_file << L"- 분류 : " << class_name << std::endl;
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							//txt_file << "- " << L"금융기관용" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"금융기관용"), L",") << std::endl;
+							txt_file << "- " << L"유효기간" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"유효기간"), L",") << std::endl;
+							txt_file << "- " << L"발급번호" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"발급번호"), L",") << std::endl;
+							txt_file << "- " << L"업체명" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"업체명"), L",") << std::endl;
+							txt_file << "- " << L"대표자" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"대표자"), L",") << std::endl;
+							txt_file << "- " << L"사업자등록번호" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"사업자등록번호"), L",") << std::endl;
+							txt_file << "- " << L"자금명" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"자금명"), L",") << std::endl;
+							//txt_file << "- " << L"최대한도액" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"최대한도액"), L",") << std::endl;
+							//txt_file << "- " << L"담보구분" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"담보구분"), L",") << std::endl;
+							txt_file.close();
+#endif
+						}
+
+						else if (class_name == L"MIDDLE")
+						{
+							auto title = extract_title(configuration, class_name, searched_fields, blocks, image_size, L"제목");
+							auto company_name = extract_company_name_for_mid(configuration, class_name, searched_fields, blocks, image_size, L"업체명");
+							auto representation = extract_representation_for_small(configuration, class_name, searched_fields, blocks, image_size, L"대표자");
+							auto loan_period = extract_loan_period(configuration, class_name, searched_fields, blocks, image_size, L"표제목");
+
+							std::vector<std::pair<cv::Rect, std::wstring>> guarantee_expiry_date;
+							std::vector<std::pair<cv::Rect, std::wstring>> section;
+							std::vector<std::pair<cv::Rect, std::wstring>> amount;
+							std::vector<std::pair<cv::Rect, std::wstring>> guarantee_type;
+							std::vector<std::pair<cv::Rect, std::wstring>> handling_organization;
+							//std::vector<std::pair<cv::Rect, std::wstring>> loan_period;
+							std::vector<std::pair<cv::Rect, std::wstring>> interest_rate;
+							//std::vector<std::pair<cv::Rect, std::wstring>> test;
+
+							auto table_title = extract_table_title(configuration, class_name, searched_fields, blocks, image_size, L"표제목");
+							section = extract_section(configuration, class_name, searched_fields, blocks, image_size, L"구분", table_title, 1, 3);
+							amount = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"금액", section, 3, 1);
+							guarantee_type = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"담보종류", amount, 3, 1);
+							handling_organization = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"취급기관", guarantee_type, 3, 1);
+
+							//찾은 금액의 아래아래 라인이 길이가 길게 나오는 경우까지
+							//길게나오는 경우의 이전 값이 합계. 그 이전 값들은 벡터 원소로 추가하여 출력.
+
+							if (loan_period.empty()) {
+								loan_period = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"대출기간", handling_organization, 3, 1);
+								if (!loan_period.empty())
+								{
+									loan_period.at(0).second = retirement_document_recognizer::postprocess_loan_period_misrecog(loan_period.at(0).second);
+								}
+							}
+							auto flag = false;
+							if (!handling_organization.empty() && !loan_period.empty())
+							{
+								if (handling_organization.at(0).first == loan_period.at(0).first)
+								{
+									handling_organization.clear();
+								}
+							}
+							if (handling_organization.empty()) {
+								handling_organization = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"취급기관", loan_period, 2, 1);
+								if (!handling_organization.empty())
+								{
+									if (handling_organization.at(0).second.length() < 5)
+									{
+										guarantee_type = handling_organization;
+										handling_organization.clear();
+										handling_organization = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"취급기관", guarantee_type, 3, 1);
+									}
+								}
+							}
+
+							if (guarantee_type.empty())
+							{
+								guarantee_type = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"담보종류", handling_organization, 2, 1);
+							}
+
+							if (amount.empty())
+							{
+								amount = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"금액", guarantee_type, 2, 1);
+							}
+							if (section.empty())
+							{
+								section = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"구분", amount, 2, 1);
+							}
+							if (!guarantee_type.empty()) {
+								guarantee_type.at(0).second = retirement_document_recognizer::postprocess_guarantee_type(guarantee_type.at(0).second);
+							}
+							if (!handling_organization.empty()) {
+								handling_organization.at(0).second = retirement_document_recognizer::postprocess_handling_organization(handling_organization.at(0).second);
+							}
+							if (!amount.empty()) {
+								amount.at(0).second = retirement_document_recognizer::postprocess_amount(amount.at(0).second);
+							}
+							if (!section.empty()) {
+								section.at(0).second = retirement_document_recognizer::postprocess_section(section.at(0).second);
+							}
+							guarantee_expiry_date = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"대출취급기한", section, 1, 1);
+							if (!guarantee_expiry_date.empty()) {
+								guarantee_expiry_date.at(0).second = retirement_document_recognizer::postprocess_expiry_date_for_mid(guarantee_expiry_date.at(0).second);
+							}
+
+							if (title.empty())
+							{
+								title = extract_title_2(configuration, class_name, searched_fields, blocks, image_size, L"자금명");
+							}
+
+							if (!company_name.empty() && representation.empty())
+							{
+								representation = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"대표자", company_name, 3, 2);
+							}
+							if (company_name.empty() && !representation.empty())
+							{
+								company_name = extract_using_near_field(configuration, class_name, searched_fields, blocks, image_size, L"업체명", representation, 2, 2);
+							}
+
+							interest_rate = extract_interest_rate(configuration, class_name, searched_fields, blocks, image_size, L"금리", loan_period, 3, 1);
+
+							//extract_extra_fields(configuration, class_name, searched_fields, blocks, creditor_name, debtor_name, debtor_other_name, image_size);
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							fill_field(extracted_fields, L"제목", title);
+							fill_field(extracted_fields, L"업체명", company_name);
+							fill_field(extracted_fields, L"대표자", representation);
+							fill_field(extracted_fields, L"대출취급기한", guarantee_expiry_date);
+							fill_field(extracted_fields, L"구분", section);
+							fill_field(extracted_fields, L"금액", amount);
+							fill_field(extracted_fields, L"담보종류", guarantee_type);
+							fill_field(extracted_fields, L"취급기관", handling_organization);
+							fill_field(extracted_fields, L"대출기간", loan_period);
+							fill_field(extracted_fields, L"금리", interest_rate);
+#ifdef LOG_USE_WOFSTREAM            // 문서단위 결과
+							const auto text = to_wstring(blocks);
+							txt_file << L"ALL : " << std::endl;
+							txt_file << text << std::endl << std::endl;
+
+							txt_file << L"- 파일 : " << files[i] << std::endl;
+							txt_file << L"- 분류 : " << class_name << std::endl;
+
+							/*res_file << L"\"set name\",\"" << boost::filesystem::path(files[i]).native() << "\""<< std::endl;
+							res_file << L"\"file name\",\"" << boost::filesystem::path(files[i]).native() << "\"" << std::endl;
+							res_file << L"\"category\",\"" << class_name << "\"" << std::endl;
+							res_file << L"\"제목\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"제목"), L",") << "\"," << std::endl;
+							res_file << L"\"업체명\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"업체명"), L",") << "\"," << std::endl;
+							res_file << L"\"대표자\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"대표자"), L",") << "\"," << std::endl;
+							res_file << L"\"대출취급기한\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"대출취급기한"), L",") << "\"," << std::endl;
+							res_file << L"\"구분\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"구분"), L",") << "\"," << std::endl;
+							res_file << L"\"금액\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"금액"), L",") << "\"," << std::endl;
+							res_file << L"\"담보종류\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"담보종류"), L",") << "\"," << std::endl;
+							res_file << L"\"취급기관\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"취급기관"), L",") << "\"," << std::endl;
+							res_file << L"\"대출기간\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"대출기간"), L",") << "\"," << std::endl;
+							res_file << L"\"금리\",\"" << boost::algorithm::join(get_field_values(extracted_fields, L"금리"), L",") << "\"," << std::endl << std::endl << std::endl;
+							res_file.close();*/
+
+							//L"사업자번호", L"법인명", L"대표자", L"퇴직사유", L"퇴직급여", L"입사일", L"기산일",L"퇴사일",L"지급일",L"계좌번호",L"계좌입금금액"
+							txt_file << "- " << L"제목" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"제목"), L",") << std::endl;
+							txt_file << "- " << L"업체명" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"업체명"), L",") << std::endl;
+							txt_file << "- " << L"대표자" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"대표자"), L",") << std::endl;
+							txt_file << "- " << L"대출취급기한" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"대출취급기한"), L",") << std::endl;
+							txt_file << "- " << L"구분" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"구분"), L",") << std::endl;
+							txt_file << "- " << L"금액" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"금액"), L",") << std::endl;
+							txt_file << "- " << L"담보종류" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"담보종류"), L",") << std::endl;
+							txt_file << "- " << L"취급기관" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"취급기관"), L",") << std::endl;
+							txt_file << "- " << L"대출기간" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"대출기간"), L",") << std::endl;
+							txt_file << "- " << L"금리" << " : " << boost::algorithm::join(get_field_values(extracted_fields, L"금리"), L",") << std::endl;
+							txt_file.close();
+
+#endif
+						}
+						if (extracted_fields.empty())
+							continue;
+
+						if (fields.find(class_name) == fields.end())
+							fields.emplace(class_name, std::vector<std::unordered_map<std::wstring, std::vector<std::wstring>>>());
+
+						fields.at(class_name).emplace_back(extracted_fields);
+					}
+
+#if __USE_ENGINE__
+					release_engine_object(std::make_pair(loader, engine), false);
+#endif
+					// } , std::stoi(configuration.at(L"engine").at(L"concurrency")));
+				}
+				catch (_com_error& e) {
+					spdlog::get("recognizer")->error("exception : {} : ({} : {})", to_cp949(e.Description().GetBSTR()), __FILE__, __LINE__);
+				}
+
+				return extracted_fields;
+			}
+
+		private:
+			static void saveArea(std::wstring dir_path, std::wstring keyword, cv::Mat image, std::vector<std::pair<cv::Rect, std::wstring>>& extracted_fields) {
+				if (image.empty()) {
+					return;
+				}
+				int i = 0;
+				int value = 20;
+				for (const auto& temp : extracted_fields) {
+					auto rect = std::get<0>(temp);
+					rect.x -= value / 2;
+					rect.y -= value / 2;
+					if (rect.x < 0) {
+						rect.x = 0;
+					}
+					if (rect.y < 0) {
+						rect.y = 0;
+					}
+
+					rect.width += value;
+					rect.height += value;
+					std::wstring save_file_path = fmt::format(L"{}{}{}_{:02d}{}", dir_path, L"\\", keyword, i, L".jpg");
+					cv::imwrite(to_utf8(save_file_path).c_str(), image(rect));
+					i++;
+				}
+			}
+
+
+			static void drawArea(cv::Mat image, std::vector<std::pair<cv::Rect, std::wstring>>& extracted_fields) {
+				if (image.empty()) {
+					return;
+				}
+				for (const auto& temp : extracted_fields) {
+					const auto& rect = std::get<0>(temp);
+					cv::rectangle(image, rect, cv::Scalar(0, 0, 255), 1);
+				}
+			}
+			static void insertConnectInfo(int index, std::vector<std::set<int>>& connect_info, std::set<int>& connect_list) {
+				std::set<int>& current_set = connect_info[index];
+
+				if (current_set.size() <= 0) {
+					return;
+				}
+
+				connect_list.insert(current_set.begin(), current_set.end());
+				current_set.erase(current_set.begin(), current_set.end());
+				std::set<int> temp_list;
+				for (auto iter = connect_list.begin(); iter != connect_list.end(); ++iter) {
+					int new_index = *iter;
+					if (connect_info[new_index].size() > 0) {
+						insertConnectInfo(*iter, connect_info, temp_list);
+					}
+				}
+				connect_list.insert(temp_list.begin(), temp_list.end());
+			}
+
+			static std::vector<std::vector<std::pair<cv::Rect, std::wstring>>>
+				split_fields(std::vector<std::pair<cv::Rect, std::wstring>>& fields,
+					const std::function<bool(const std::pair<cv::Rect, std::wstring>& a, std::pair<cv::Rect, std::wstring>& b)>& condition) {
+				std::vector<std::set<int>> connect_info;
+				for (int i = 0; i < fields.size(); ++i) {
+					std::set<int> temp;
+					temp.insert(i);
+					connect_info.push_back(temp);
+				}
+
+				for (int i = 0; i < fields.size(); ++i) {
+					for (int j = 0; j < fields.size(); ++j) {
+						if (i == j) {
+							continue;
+						}
+
+						if (condition(fields[i], fields[j])) {
+							connect_info[i].insert(j);
+						}
+					}
+				}
+				for (int i = 0; i < connect_info.size(); ++i) {
+					std::set<int> connect_list;
+					insertConnectInfo(i, connect_info, connect_list);
+					connect_info[i] = connect_list;
+				}
+
+				std::vector<std::vector<std::pair<cv::Rect, std::wstring>>> ret;
+				for (int i = fields.size() - 1; i >= 0; --i) {
+					if (connect_info[i].size() > 0) {
+						std::vector<std::pair<cv::Rect, std::wstring>> temp;
+						for (auto iter = connect_info[i].begin(); iter != connect_info[i].end(); ++iter) {
+							int index = *iter;
+							temp.push_back(fields[index]);
+						}
+						ret.push_back(temp);
+					}
+				}
+				return ret;
+			}
+
+
+			static std::vector<std::wstring>
+				get_field_values(const std::unordered_map<std::wstring, std::vector<std::wstring>>& extracted_fields, const std::wstring& field_column) {
+				for (const auto& field : extracted_fields) {
+					if (std::get<0>(field) == field_column) {
+						return std::get<1>(field);
+					}
+				}
+
+				return std::vector<std::wstring>();
+			}
+
+			// 금액 [[
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_price(const std::pair<cv::Rect, std::wstring>& price)
+			{
+				auto cleaned = std::get<1>(price);
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L":"), L"");
+
+				boost::trim(cleaned);
+
+				return std::make_pair(std::get<0>(price), cleaned);
+			}
+
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_company_number(const std::pair<cv::Rect, std::wstring>& val)
+			{
+				auto cleaned = std::get<1>(val);
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[ ]"), L"");
+
+				boost::trim(cleaned);
+
+				return std::make_pair(std::get<0>(val), cleaned);
+			}
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_retirement_pay(const std::pair<cv::Rect, std::wstring>& val)
+			{
+				auto cleaned = std::get<1>(val);
+				auto rect_check = std::get<0>(val);
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[ ]"), L"");
+
+				boost::trim(cleaned);
+
+				return std::make_pair(std::get<0>(val), cleaned);
+			}
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_erase_white_space(const std::pair<cv::Rect, std::wstring>& val)
+			{
+				auto cleaned = std::get<1>(val);
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L" "), L"");
+
+				boost::trim(cleaned);
+
+				return std::make_pair(std::get<0>(val), cleaned);
+			}
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_company_name_for_mid(const std::pair<cv::Rect, std::wstring>& val)
+			{
+				auto cleaned = std::get<1>(val);
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[ ]"), L"");
+
+				boost::trim(cleaned);
+
+				return std::make_pair(std::get<0>(val), cleaned);
+			}
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_date(const std::pair<cv::Rect, std::wstring>& val)
+			{
+				auto cleaned = std::get<1>(val);
+
+
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"0？"), L"09");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"？"), L"2");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"0！"), L"01");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"1！"), L"11");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L":"), L"11");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"이"), L"01");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[(]V"), L"0/");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"성"), L"9");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"있"), L"2/");
+				boost::trim(cleaned);
+
+				return std::make_pair(std::get<0>(val), cleaned);
+			}
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_erase_keywords(const std::pair<cv::Rect, std::wstring>& val)
+			{
+				auto cleaned = std::get<1>(val);
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"상호"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"대표자"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"성명"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"\(성영"), L"");
+				boost::trim(cleaned);
+
+				return std::make_pair(std::get<0>(val), cleaned);
+			}
+			//return boost::regex_replace(a, boost::wregex(L"[^0-9가-힣a-zA-Z]"), L"");
+			static std::wstring
+				postprocess_erase_punctuation_key(const std::wstring& val)
+			{
+
+				auto cleaned = boost::regex_replace(val, boost::wregex(L"[^0-9가-힣a-zA-Z]"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"상호"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"대표자"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"성명"), L"");
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"\(성영"), L"");
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_pay(const std::wstring& val)
+			{
+
+				auto cleaned = boost::regex_replace(val, boost::wregex(L"[^0-9,\.]"), L"");
+				auto digit = boost::regex_replace(val, boost::wregex(L"[^0-9]"), L"");
+				if (digit.length() < 7) {
+					return L"";
+				}
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_company_name(const std::wstring& val)
+			{
+
+				std::wstring cleaned = boost::regex_replace(val, boost::wregex(L" "), L"");
+				if (cleaned.find(L"상호") != -1)
+				{
+					cleaned = cleaned.substr(cleaned.find(L"상호") + 2);
+				}
+				if (cleaned.find(L"3.") != -1)
+				{
+					cleaned = cleaned.substr(0, cleaned.find(L"3."));
+				}
+				if (cleaned.find(L"대표자") != -1)
+				{
+					cleaned = cleaned.substr(0, cleaned.find(L"대표자"));
+				}
+
+				//"";
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"〈"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"〉"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"{"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"}"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"《"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"》"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"⑵"), L"(21");
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"[^가-힣a-zA-Z]"), L"");
+
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"대표자"), L"");
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"성명"), L"");
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"\(성영"), L"");
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_company_name_for_income(const std::wstring& val)
+			{
+
+				std::wstring cleaned = boost::regex_replace(val, boost::wregex(L" "), L"");
+				if (cleaned.find(L"상호") != -1)
+				{
+					cleaned = cleaned.substr(cleaned.find(L"상호") + 2);
+				}
+				if (cleaned.find(L"3.") != -1)
+				{
+					cleaned = cleaned.substr(0, cleaned.find(L"3."));
+				}
+				if (cleaned.find(L"대표자") != -1)
+				{
+					cleaned = cleaned.substr(0, cleaned.find(L"대표자"));
+				}
+				/*if (cleaned.find(L"|") != -1)
+				{
+				cleaned = cleaned.substr(0, cleaned.find(L"|"));
+				}*/
+				//"";
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"〈"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"〉"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"{"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"}"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"《"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"》"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"([(][^유][)]|[(주][^가-힣]|[^가-힣][주)])"), L"(주)");
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"[(주][^가-힣]"), L"(주)");
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"[^가-힣][주)]"), L"(주)");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"주식회시"), L"주식회사");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"대한..신[(]주[)]"), L"대한광통신(주)");
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_company_name_for_mid(const std::wstring& val)
+			{
+
+				std::wstring cleaned = boost::regex_replace(val, boost::wregex(L" "), L"");
+
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"〈"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"〉"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"{"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"}"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"《"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"》"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"⑵"), L"(21");
+
+				if (cleaned.size() < 5)
+					return L"";
+
+				return cleaned;
+			}
+
+			static std::wstring
+				postprocess_title(const std::wstring& val)
+			{
+
+				std::wstring cleaned = boost::regex_replace(val, boost::wregex(L""), L"");
+				if (cleaned.find(L"지원예정") != -1)
+				{
+					cleaned = cleaned.substr(0, cleaned.find(L"지원예정"));
+				}
+
+				if (cleaned.find(L"자금") == -1)
+				{
+					return L"";
+				}
+
+				return cleaned;
+			}
+
+			static std::wstring
+				postprocess_representation(const std::wstring& val)
+			{
+				std::wstring cleaned = boost::regex_replace(val, boost::wregex(L" "), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"〈"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"〉"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"{"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"}"), L")");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"《"), L"(");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"》"), L")");
+				if (cleaned.find(L"성명") != -1)
+				{
+					cleaned = cleaned.substr(cleaned.find(L"성명") + 2);
+				}
+				if (cleaned.find(L"\(성영") != -1)
+				{
+					cleaned = cleaned.substr(cleaned.find(L"\(성영") + 3);
+				}
+
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[^가-힣a-zA-Z0-9]"), L"");
+				if (cleaned.find(L"상형") != -1 && cleaned.length() >= cleaned.find(L"상형") + 4)
+				{
+					auto sub_idx = cleaned.find(L"상형");
+					cleaned = cleaned.substr(sub_idx + 2);
+				}
+				if (cleaned.length() > 10)
+				{
+					return L"";
+				}
+
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"대표자"), L"");
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"성명"), L"");
+				//cleaned = boost::regex_replace(cleaned, boost::wregex(L"\(성영"), L"");
+				return cleaned;
+			}
+
+			static std::wstring
+				postprocess_price(const std::wstring& price)
+			{
+
+				auto cleaned = boost::regex_replace(price, boost::wregex(L"[^0-9]"), L"");
+
+				if (cleaned.length() < 5 || price.length() - cleaned.length() > 12) {
+					return L"";
+				}
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_issue_number(const std::wstring& val)
+			{
+
+				std::wstring cleaned = boost::regex_replace(val, boost::wregex(L"[^-0-9A-Za-z]"), L"");
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_company_number(const std::wstring& value)
+			{
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"[^-0-9]"), L"");
+				auto digit = boost::regex_replace(value, boost::wregex(L"[^0-9]"), L"");
+				if (digit.length() != 10) {
+					return L"";
+				}
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_fund_name(const std::wstring& value)
+			{
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"[-ㅡ―]"), L"");
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_financial_institution(const std::wstring& val)
+			{
+
+				std::wstring cleaned = boost::regex_replace(val, boost::wregex(L" "), L"");
+				if (cleaned.find(L"발급번호") != -1)
+				{
+					cleaned = cleaned.substr(0, cleaned.find(L"발급번호"));
+				}
+				if (cleaned.find(L"귀중") != -1)
+				{
+					cleaned = cleaned.substr(0, cleaned.find(L"귀중") + 2);
+				}
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_date(const std::wstring& value)
+			{
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"？"), L"2");
+				if (cleaned.find(L"연수") != -1)
+				{
+					cleaned = cleaned.substr(cleaned.find(L"연수") + 2);
+				}
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"？"), L"2");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"0！"), L"01");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[\)]"), L"1");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[\(]"), L"1");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"1！"), L"11");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"이"), L"01");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"오"), L"2");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L":"), L"1");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"시"), L"/1");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L" "), L"");
+				if (cleaned.length() < 6)
+				{
+					return L"";
+				}
+				return cleaned;
+			}
+
+			static std::wstring
+				postprocess_section(const std::wstring& value)
+			{
+				if (value.empty())
+				{
+					return L"";
+				}
+
+				auto digit = boost::regex_replace(value, boost::wregex(L"[^0-9]"), L"");
+
+				if (digit.length() > 5)
+				{
+					return L"";
+				}
+
+
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"[사..|.업.|..장]"), L"사업장");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[운.|.전]"), L"운전");
+
+				if (cleaned.at(0) == L'시')
+				{
+					if (cleaned.find(L"사업장") != -1) {
+						return L"시설(사업장)";
+					}
+					else
+					{
+						return L"시설(설비)";
+					}
+				}
+
+				else if (cleaned.find(L"운전") != -1)
+				{
+					if (cleaned.find(L"일반") != -1)
+					{
+						return L"운전(일반운전)";
+					}
+					else
+					{
+						return L"운전(시운전)";
+					}
+				}
+
+				return value;
+			}
+
+			static std::wstring
+				postprocess_interest_rate(const std::wstring& value)
+			{
+
+				/*auto digit = boost::regex_replace(value, boost::wregex(L"[^0-9]"), L"");
+
+				if (digit.length() != 3)
+				{
+				return L"";
+				}*/
+
+				if (value.find(L"%") == -1)
+				{
+					return L"";
+				}
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"G"), L"0");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"가"), L"1");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"!"), L"1");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"€"), L"2");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[^0-9%]"), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"([0-9]{1})([0-9]{2})%"), L"$1\.$2%");
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_expiry_date_for_mid(const std::wstring& value)
+			{
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"W"), L"19");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[i|!|l|f]"), L"1");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"®"), L"019");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"s"), L"9");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[^0-9\.]"), L"");
+
+				return cleaned;
+			}
+
+			static std::wstring
+				postprocess_guarantee_type(const std::wstring& value)
+			{
+				if (value.length() > 5)
+				{
+					return L"";
+				}
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"독산"), L"동산");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"(.동산|부.산|부동.)"), L"부동산");
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_handling_organization(const std::wstring& value)
+			{
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"(지정|지장|X점|지S)"), L"지점");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"([0-9]{1}).?(년|거지|거치).*"), L"");
+				if (cleaned.find(L"지점") != -1)
+				{
+					cleaned.substr(0, cleaned.find(L"지점") + 2);
+				}
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_amount(const std::wstring& value)
+			{
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"B"), L"8");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"D"), L"0");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"O"), L"0");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[^0-9]"), L"");
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_loan_period(const std::wstring& value)
+			{
+				if (value.empty())
+				{
+					return L"";
+				}
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L".*([0-9]{1}).*(년|거지|거치).*([0-9]{1}).*(년|상환|상한).*"), L"$1년 거치 $3년 상환");
+				if (value.find(L"기간") != -1)
+				{
+					return L"";
+				}
+				if (cleaned == L"5년 거치 2년 상환")
+				{
+					return L"";
+				}
+
+				boost::wsmatch what;
+
+				if (boost::regex_search(cleaned, what, boost::wregex(L"[0-9]{1}년 거치 [0-9]{1}년 상환")) == false)
+				{
+					return L"";
+				}
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_loan_period_misrecog(const std::wstring& value)
+			{
+				auto cleaned = boost::regex_replace(value, boost::wregex(L".*([0-9]{1}).*(년|거지|거치).*([0-9]{1}).*(년|상환|상한).*"), L"$1년 거치 $3년 상환");
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_expiry_date(const std::wstring& value)
+			{
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"0？"), L"09");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"0！"), L"01");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"1！"), L"11");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"이"), L"01");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L":"), L"1");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[원윈]"), L"월");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L" "), L"");
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"[^0-9년월일]"), L"");
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_date_for_pension(const std::wstring& value)
+			{
+
+				auto cleaned = boost::regex_replace(value, boost::wregex(L"[,/]"), L"7");
+				auto digit = boost::regex_replace(value, boost::wregex(L"[^0-9]"), L"");
+				if (digit.length() < 7)
+				{
+					return L"";
+				}
+
+				cleaned = boost::regex_replace(cleaned, boost::wregex(L"([0-9]{4}).*([0-9]{2}).*([0-9]{2})"), L"$1-$2-$3");
+				if (cleaned.at(5) == L'9' || cleaned.at(5) == L'8' || cleaned.at(5) == L'6')
+				{
+					cleaned.at(5) = L'0';
+				}
+
+				return cleaned;
+			}
+			static std::wstring
+				postprocess_judge(const std::wstring& price)
+			{
+				auto cleaned = boost::regex_replace(price, boost::wregex(L"[ ]"), L"");
+				if (cleaned.length() > 6) {
+					return L"";
+				}
+
+				return cleaned;
+			}
+
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_court_name(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"COURT NAME") == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> product_name;
+
+				product_name = extract_field_values(fields.at(L"COURT NAME"), blocks,
+					search_self_all,
+					default_preprocess,
+					create_extract_ori_function(configuration, L"courts", 2),
+					default_postprocess);
+
+
+				if (product_name.size() > 0) {
+					product_name.erase(product_name.begin() + 1, product_name.end());
+				}
+
+				return product_name;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_event_name(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"EVENT") == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> product_name;
+				std::vector<std::pair<cv::Rect, std::wstring>> ret_items;
+
+				product_name = extract_field_values_2(fields.at(L"EVENT"), blocks,
+				{
+					std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+					std::bind(filter_search, std::placeholders::_1, std::placeholders::_2)
+				},
+					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					default_postprocess);
+
+				if (product_name.empty()) {
+					product_name = extract_field_values_2(fields.at(L"EVENT"), blocks,
+					{
+						std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+						std::bind(filter_search_2, std::placeholders::_1, std::placeholders::_2)
+					},
+						search_self,
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+				}
+
+
+
+				auto& split_product_name = split_fields(product_name, [](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+					auto a_expand = cv::Rect(0, a.first.y, std::numeric_limits<int>::max(), a.first.height);
+					return (a_expand & b.first).height > std::min(a.first.height, b.first.height) * 0.25;
+				});
+
+				if (split_product_name.size() > 0) {
+					for (const auto& split : split_product_name) {
+						if (split.size() > 0) {
+							std::pair<cv::Rect, std::wstring> temp = split[0];
+							temp = std::accumulate(std::next(std::begin(split)), std::end(split), temp,
+								[](const std::pair<cv::Rect, std::wstring>& pre, const std::pair<cv::Rect, std::wstring>& item) {
+								return std::make_pair(pre.first | item.first, fmt::format(L"{} {}", pre.second, item.second));
+							});
+							ret_items.push_back(temp);
+						}
+					}
+				}
+
+				return ret_items;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_creditor_name(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"CREDITOR") == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> product_name;
+				std::vector<std::pair<cv::Rect, std::wstring>> ret_items;
+
+				product_name = extract_field_values_2(fields.at(L"CREDITOR"), blocks,
+				{ std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false) ,
+					std::bind(filter_search, std::placeholders::_1, std::placeholders::_2) },
+					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					default_postprocess);
+
+				if (product_name.empty()) {
+					product_name = extract_field_values_2(fields.at(L"CREDITOR"), blocks,
+					{
+						std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+						std::bind(filter_search_2, std::placeholders::_1, std::placeholders::_2)
+					},
+						search_self,
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+				}
+
+
+
+				auto& split_product_name = split_fields(product_name, [](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+					auto a_expand = cv::Rect(0, a.first.y, std::numeric_limits<int>::max(), a.first.height);
+					return (a_expand & b.first).height > std::min(a.first.height, b.first.height) * 0.25;
+				});
+
+				if (split_product_name.size() > 0) {
+					for (const auto& split : split_product_name) {
+						if (split.size() > 0) {
+							std::pair<cv::Rect, std::wstring> temp = split[0];
+							temp = std::accumulate(std::next(std::begin(split)), std::end(split), temp,
+								[](const std::pair<cv::Rect, std::wstring>& pre, const std::pair<cv::Rect, std::wstring>& item) {
+								return std::make_pair(pre.first | item.first, fmt::format(L"{} {}", pre.second, item.second));
+							});
+							ret_items.push_back(temp);
+						}
+					}
+				}
+
+				if (ret_items.size() > 0) {
+					std::sort(std::begin(ret_items), std::end(ret_items),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						auto a_temp = boost::regex_replace(std::get<1>(a), boost::wregex(L"[^0-9]"), L"");
+						auto b_temp = boost::regex_replace(std::get<1>(b), boost::wregex(L"[^0-9]"), L"");
+
+						if (a_temp.length() == b_temp.length()) {
+							return to_rect(a).y < to_rect(b).y;
+						}
+						else {
+							return a_temp.length() > b_temp.length();
+						}
+					});
+					ret_items.erase(ret_items.begin() + 1, ret_items.end());
+				}
+
+				return ret_items;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_debtor_other_name(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"DEBTOR_OTHER") == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> product_name;
+				std::vector<std::pair<cv::Rect, std::wstring>> ret_items;
+
+				product_name = extract_field_values_2(fields.at(L"DEBTOR_OTHER"), blocks,
+				{ std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+					std::bind(filter_search, std::placeholders::_1, std::placeholders::_2)
+				},
+					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					default_postprocess);
+
+				if (product_name.empty()) {
+					product_name = extract_field_values_2(fields.at(L"DEBTOR_OTHER"), blocks,
+					{
+						std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+						std::bind(filter_search_2, std::placeholders::_1, std::placeholders::_2)
+					},
+						search_self,
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+				}
+
+
+				auto& split_product_name = split_fields(product_name, [](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+					auto a_expand = cv::Rect(0, a.first.y, std::numeric_limits<int>::max(), a.first.height);
+					return (a_expand & b.first).height > std::min(a.first.height, b.first.height) * 0.25;
+				});
+
+				if (split_product_name.size() > 0) {
+					for (const auto& split : split_product_name) {
+						if (split.size() > 0) {
+							std::pair<cv::Rect, std::wstring> temp = split[0];
+							temp = std::accumulate(std::next(std::begin(split)), std::end(split), temp,
+								[](const std::pair<cv::Rect, std::wstring>& pre, const std::pair<cv::Rect, std::wstring>& item) {
+								return std::make_pair(pre.first | item.first, fmt::format(L"{} {}", pre.second, item.second));
+							});
+							ret_items.push_back(temp);
+						}
+					}
+				}
+
+				if (ret_items.size() > 0) {
+					std::sort(std::begin(ret_items), std::end(ret_items),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						return to_rect(a).y < to_rect(b).y;
+					});
+					ret_items.erase(ret_items.begin() + 1, ret_items.end());
+				}
+
+				return ret_items;
+			}
+
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_debtor_name(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"DEBTOR") == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> product_name;
+				std::vector<std::pair<cv::Rect, std::wstring>> ret_items;
+
+				product_name = extract_field_values_2(fields.at(L"DEBTOR"), blocks,
+				{
+					std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+					std::bind(filter_search, std::placeholders::_1, std::placeholders::_2)
+				},
+					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					default_postprocess);
+
+				if (product_name.empty()) {
+					product_name = extract_field_values_2(fields.at(L"DEBTOR"), blocks,
+					{
+						std::bind(filter_left_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 5, 5, false),
+						std::bind(filter_search_2, std::placeholders::_1, std::placeholders::_2)
+					},
+						search_self,
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+				}
+
+
+				auto& split_product_name = split_fields(product_name, [](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+					auto a_expand = cv::Rect(0, a.first.y, std::numeric_limits<int>::max(), a.first.height);
+					return (a_expand & b.first).height > std::min(a.first.height, b.first.height) * 0.25;
+				});
+
+				if (split_product_name.size() > 0) {
+					for (const auto& split : split_product_name) {
+						if (split.size() > 0) {
+							std::pair<cv::Rect, std::wstring> temp = split[0];
+							temp = std::accumulate(std::next(std::begin(split)), std::end(split), temp,
+								[](const std::pair<cv::Rect, std::wstring>& pre, const std::pair<cv::Rect, std::wstring>& item) {
+								return std::make_pair(pre.first | item.first, fmt::format(L"{} {}", pre.second, item.second));
+							});
+							ret_items.push_back(temp);
+						}
+					}
+				}
+
+				if (ret_items.size() > 0) {
+					std::sort(std::begin(ret_items), std::end(ret_items),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						return to_rect(a).y < to_rect(b).y;
+					});
+					ret_items.erase(ret_items.begin() + 1, ret_items.end());
+				}
+
+				return ret_items;
+
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_price_name(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"PRICE") == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> product_name;
+
+				product_name = extract_field_values(fields.at(L"PRICE"), blocks,
+					std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+					retirement_document_recognizer::preprocess_price,
+					create_extract_function(L"([금]{0,1} ?.* ?[원])"),
+					retirement_document_recognizer::postprocess_price);
+
+				if (product_name.empty()) {
+					product_name = extract_field_values(fields.at(L"PRICE"), blocks,
+						search_self,
+						retirement_document_recognizer::preprocess_price,
+						create_extract_function(L"([금]{0,1} ?.* ?[원])"),
+						retirement_document_recognizer::postprocess_price);
+				}
+
+				if (product_name.empty()) {
+					product_name = extract_field_values(fields.at(L"PRICE"), blocks,
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 8.0, 100, true),
+						retirement_document_recognizer::preprocess_price,
+						create_extract_function(L"([금]{0,1} ?.* ?[원])"),
+						retirement_document_recognizer::postprocess_price);
+
+					std::sort(std::begin(product_name), std::end(product_name),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						auto a_num = std::stoi(boost::regex_replace(std::get<1>(a), boost::wregex(L"[^0-9]"), L""));
+						auto b_num = std::stoi(boost::regex_replace(std::get<1>(b), boost::wregex(L"[^0-9]"), L""));
+						return a_num > b_num;
+					});
+				}
+
+				if (product_name.empty()) {
+					product_name = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, blocks,
+						default_search,
+							retirement_document_recognizer::preprocess_price,
+							create_extract_function(L"([금]{0,1} ?.* ?[원])"),
+							retirement_document_recognizer::postprocess_price);
+
+					std::sort(std::begin(product_name), std::end(product_name),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						auto a_num = std::stoi(boost::regex_replace(std::get<1>(a), boost::wregex(L"[^0-9]"), L""));
+						auto b_num = std::stoi(boost::regex_replace(std::get<1>(b), boost::wregex(L"[^0-9]"), L""));
+						return a_num > b_num;
+					});
+				}
+
+				if (product_name.size() > 0) {
+					product_name.erase(product_name.begin() + 1, product_name.end());
+				}
+
+				return product_name;
+			}
+			//search_self_2 찾는 내용이 왼쪽에 있을 경우
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_basic_rightward(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self,
+					retirement_document_recognizer::preprocess_date,
+					default_extract,
+					retirement_document_recognizer::postprocess_date);
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						retirement_document_recognizer::preprocess_date,
+						default_extract,
+						retirement_document_recognizer::postprocess_date);
+				}
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_table_title(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self_all,
+					default_preprocess,
+					default_extract,
+					default_postprocess);
+
+				if (!found.empty()) {
+					if (found.at(0).first.width > image_size.width*0.5)
+					{
+						found.at(0).first.width = (int)found.at(0).first.width / 6.6;
+					}
+				}
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_title_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self,
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_title);
+
+				std::vector<std::pair<cv::Rect, std::wstring>> res;
+				int min_y = image_size.height*0.3;
+				for (auto f : found)
+				{
+					if (f.first.y < min_y)
+					{
+						min_y = f.first.y;
+						res.clear();
+						res.emplace_back(f);
+					}
+				}
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_title);
+				}
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_title(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self_left,
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_title);
+
+				std::vector<std::pair<cv::Rect, std::wstring>> res;
+				int min_y = image_size.height*0.3;
+				for (auto f : found)
+				{
+					if (f.first.y < min_y)
+					{
+						min_y = f.first.y;
+						res.clear();
+						res.emplace_back(f);
+					}
+				}
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_left_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+				}
+
+				//if (found.size() > 0) {
+				//	found.erase(found.begin() + 1, found.end());
+				//}
+
+				return res;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_issue_number(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self,
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_issue_number);
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_issue_number);
+				}
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_financial_institution(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self,
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_financial_institution);
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_financial_institution);
+				}
+				for (auto f : found)
+				{
+					if (f.first.y < image_size.height * 0.33)
+					{
+						std::vector<std::pair<cv::Rect, std::wstring>> a;
+						a.emplace_back(f);
+						return a;
+					}
+				}
+
+				// if (found.size() > 0) {
+				//	found.erase(found.begin() + 1, found.end());
+				//}
+
+				return found;
+			}
+
+
+			//찾은 필드와 방향으로 추출
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_using_near_field(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name,
+					std::vector<std::pair<cv::Rect, std::wstring>> near_field, int direction, int nth)
+			{
+				if (near_field.empty())
+				{
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+				}
+
+				/*auto postprocess = default_postprocess;
+				if (field_name == L"담보종류")
+				{
+				postprocess = retirement_document_recognizer::postprocess_guarantee_type;
+				}*/
+
+				auto f = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					std::make_tuple(near_field.at(0).first, near_field.at(0).second, cv::Range(0, near_field.at(0).second.size())) };
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				if (direction == 0)//up
+				{
+					found = extract_field_values(f, blocks,
+						std::bind(find_nth_up_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, nth),
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+				}
+				else if (direction == 1) //down
+				{
+					found = extract_field_values(f, blocks,
+						std::bind(find_nth_down_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, nth),
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+				}
+				else if (direction == 2) //left
+				{
+					found = extract_field_values(f, blocks,
+						std::bind(find_nth_left_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, nth),
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+				}
+				else //right
+				{
+					found = extract_field_values(f, blocks,
+						std::bind(find_nth_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, nth),
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+				}
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_company_name_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name,
+					std::vector<std::pair<cv::Rect, std::wstring>> near_field, int direction, int nth)
+			{
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				if (!near_field.empty())
+				{
+					auto f = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(near_field.at(0).first, near_field.at(0).second, cv::Range(0, near_field.at(0).second.size())) };
+
+					if (direction == 0) {
+						found = extract_field_values(f, blocks,
+							std::bind(find_nth_up_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.7, 100, true, nth),
+							retirement_document_recognizer::preprocess_erase_white_space,
+							default_extract,
+							retirement_document_recognizer::postprocess_company_name_for_income);
+					}
+					else if (direction == 3)
+					{
+						found = extract_field_values(f, blocks,
+							std::bind(find_nth_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, nth),
+							retirement_document_recognizer::preprocess_erase_white_space,
+							default_extract,
+							retirement_document_recognizer::postprocess_company_name_for_income);
+						if (!found.empty())
+						{
+							if (found.at(0).first.width < near_field.at(0).first.width * 1.2)
+							{
+								found = extract_field_values(f, blocks,
+									std::bind(find_nth_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, nth + 1),
+									retirement_document_recognizer::preprocess_erase_white_space,
+									default_extract,
+									retirement_document_recognizer::postprocess_company_name_for_income);
+							}
+						}
+					}
+
+				}
+
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				if (found.empty())
+				{
+					found = extract_field_values(fields.at(field_name), blocks,
+						search_self,
+						retirement_document_recognizer::preprocess_erase_white_space,
+						default_extract,
+						retirement_document_recognizer::postprocess_company_name_for_income);
+
+					if (found.empty()) {
+						found = extract_field_values(fields.at(field_name), blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							retirement_document_recognizer::preprocess_erase_white_space,
+							default_extract,
+							retirement_document_recognizer::postprocess_company_name_for_income);
+					}
+				}
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_enter_date(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name,
+					std::vector<std::pair<cv::Rect, std::wstring>> near_field, int direction, int nth)
+			{
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found, found_;
+				double width_ratio = 4.4;
+				double distance_ratio = 1.3;
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				found = extract_field_values(fields.at(L"최종근속연수"), blocks,
+					search_self,
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_date);
+
+				if (found.empty())
+				{
+					found = extract_field_values(fields.at(L"최종근속연수"), blocks,
+						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_date);
+				}
+				/*if (!found.empty())
+				{
+				if (found.at(0).first.y + found.at(0).first.height*0.5 < std::get<0>(fields.at(field_name).at(0)).y + std::get<0>(fields.at(field_name).at(0)).height * 2)
+				{
+				found = extract_field_values(fields.at(field_name), blocks,
+				std::bind(find_nth_down_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0, 100, false, 2),
+				retirement_document_recognizer::preprocess_date,
+				default_extract,
+				retirement_document_recognizer::postprocess_date);
+				}
+				}*/
+
+
+				if (found.empty()) {
+					found_ = extract_field_values(fields.at(L"입사일"), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.75, 0.0, 100, false, false, false),
+						retirement_document_recognizer::preprocess_date,
+						default_extract,
+						retirement_document_recognizer::postprocess_date);
+
+					if (!found_.empty())
+					{
+						found_.at(0).first.width = found_.at(0).first.width * width_ratio;
+						found = find_area_lines(std::make_tuple(found_.at(0).first, L"", cv::Range(0, 0)), blocks, 0.8);
+					}
+				}
+				if (found.empty()) {
+					found_ = extract_field_values(fields.at(L"기산일"), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.75, 0.0, 100, false, false, false),
+						retirement_document_recognizer::preprocess_date,
+						default_extract,
+						retirement_document_recognizer::postprocess_date);
+
+					if (!found_.empty())
+					{
+						found_.at(0).first.x = found_.at(0).first.x - found_.at(0).first.width * 1.3;
+						found_.at(0).first.width = found_.at(0).first.width * width_ratio;
+						found = find_area_lines(std::make_tuple(found_.at(0).first, L"", cv::Range(0, 0)), blocks, 0.8);
+					}
+				}
+				if (found.empty()) {
+					found_ = extract_field_values(fields.at(L"퇴사일"), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.75, 0.0, 100, false, false, false),
+						retirement_document_recognizer::preprocess_date,
+						default_extract,
+						retirement_document_recognizer::postprocess_date);
+
+					if (!found_.empty())
+					{
+						found_.at(0).first.x = found_.at(0).first.x - found_.at(0).first.width * 2.5;
+						found_.at(0).first.width = found_.at(0).first.width * width_ratio;
+						found = find_area_lines(std::make_tuple(found_.at(0).first, L"", cv::Range(0, 0)), blocks, 0.8);
+					}
+				}
+				if (found.empty()) {
+					found_ = extract_field_values(fields.at(L"지급일"), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.75, 0.0, 100, false, false, false),
+						retirement_document_recognizer::preprocess_date,
+						default_extract,
+						retirement_document_recognizer::postprocess_date);
+
+					if (!found_.empty())
+					{
+						found_.at(0).first.x = found_.at(0).first.x - found_.at(0).first.width * 3.5;
+						found_.at(0).first.width = found_.at(0).first.width * width_ratio;
+						found = find_area_lines(std::make_tuple(found_.at(0).first, L"", cv::Range(0, 0)), blocks, 0.8);
+					}
+				}
+				//if (!near_field.empty() && found.empty())
+				//{
+				//	auto f = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+				//		std::make_tuple(near_field.at(0).first, near_field.at(0).second, cv::Range(0, near_field.at(0).second.size())) };
+				//	std::vector<std::pair<cv::Rect, std::wstring>> found_via;
+				//	std::vector<std::pair<cv::Rect, std::wstring>> found_;
+				//	found_via = extract_field_values(f, blocks,
+				//		std::bind(find_nth_left_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0, 100, false, nth),
+				//		default_preprocess,
+				//		default_extract,
+				//		default_postprocess);
+				//	
+				//	if (!found_via.empty()) {
+				//		auto f2 = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+				//			std::make_tuple(found_via.at(0).first, found_via.at(0).second, cv::Range(0, found_via.at(0).second.size())) };
+				//		
+				//		found_ = extract_field_values(f2, blocks,
+				//			std::bind(find_nth_down_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0, 100, false, 6),
+				//			default_preprocess,
+				//			default_extract,
+				//			default_postprocess);
+				//		if (!found_.empty()) {
+				//			auto f3 = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+				//				std::make_tuple(found_.at(0).first, found_.at(0).second, cv::Range(0, found_.at(0).second.size())) };
+
+				//			found = extract_field_values(f3, blocks,
+				//				std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0, 100, false),
+				//				//retirement_document_recognizer::preprocess_date,
+				//				default_preprocess,
+				//				default_extract,
+				//				default_postprocess);
+				//				//retirement_document_recognizer::postprocess_date);
+				//		}
+				//	}
+				//}
+
+				/*if (found.size() > 0) {
+				found.erase(found.begin() + 1, found.end());
+				}*/
+
+				return found;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_retirement_pay_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name,
+					std::vector<std::pair<cv::Rect, std::wstring>> near_field, int direction, int nth)
+			{
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+				if (!near_field.empty())
+				{
+					auto f = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(near_field.at(0).first, near_field.at(0).second, cv::Range(0, near_field.at(0).second.size())) };
+
+					found = extract_field_values(f, blocks,
+						std::bind(find_nth_down_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.8, 100, false, nth),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_pay);
+					if (!found.empty())
+					{
+						if (found.at(0).first.width > near_field.at(0).first.width*1.5)
+						{
+							//found.at(0).first.width = found.at(0).first.width / 2;
+							//auto overlap = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+							//	std::make_tuple(found.at(0).first, found.at(0).second, cv::Range(0, found.at(0).second.size()/2)) };
+							//auto overlap = find_area_lines(std::make_tuple(found.at(0).first, L"", cv::Range(0, 0)), blocks, 0.8);
+							found.clear();
+							//found = overlap;
+						}
+					}
+					if (found.empty())
+					{
+						found = extract_field_values(f, blocks,
+							std::bind(find_nth_down_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.8, 100, false, nth + 1),
+							default_preprocess,
+							default_extract,
+							retirement_document_recognizer::postprocess_pay);
+						if (!found.empty())
+						{
+							if (found.at(0).first.width > near_field.at(0).first.width*1.5)
+							{
+								//found.at(0).first.width = found.at(0).first.width / 2;
+								//auto overlap = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+								//	std::make_tuple(found.at(0).first, found.at(0).second, cv::Range(0, found.at(0).second.size()/2)) };
+								//auto overlap = find_area_lines(std::make_tuple(found.at(0).first, L"", cv::Range(0, 0)), blocks, 0.8);
+								found.clear();
+								//found = overlap;
+							}
+						}
+					}
+				}
+
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_pay);
+				}
+
+				if (found.empty())
+				{
+					found = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, blocks,
+						default_search,
+							retirement_document_recognizer::preprocess_erase_white_space,
+							create_extract_function(L"([0-9]{1,3}[,\.][0-9]{3}[,\.][0-9]{3})"),
+							retirement_document_recognizer::postprocess_pay);
+				}
+
+				std::vector<std::pair<cv::Rect, std::wstring>> res;
+
+
+				for (auto v : found)
+				{
+					if (v.first.y < image_size.height*0.45 && v.first.x > image_size.width*0.5)
+					{
+						res.emplace_back(v);
+					}
+				}
+				if (res.size() > 0) {
+					std::sort(std::begin(res), std::end(res),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						return to_rect(a).x > to_rect(b).x;
+					});
+				}
+				//x가 가장 큰 것으로 정렬?
+				if (res.size() > 0) {
+					res.erase(res.begin() + 1, res.end());
+				}
+
+				return res;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_interest_rate(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name,
+					std::vector<std::pair<cv::Rect, std::wstring>> near_field, int direction, int nth)
+			{
+				if (near_field.empty())
+				{
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+				}
+
+				auto f = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					std::make_tuple(near_field.at(0).first, near_field.at(0).second, cv::Range(0, near_field.at(0).second.size())) };
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+
+				found = extract_field_values(f, blocks,
+					std::bind(find_nth_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, nth),
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_interest_rate);
+
+				if (found.empty())
+				{
+					found = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, blocks,
+						default_search,
+							retirement_document_recognizer::preprocess_company_number,
+							create_extract_function(L"([0-9.]{3,4}%)"),
+							retirement_document_recognizer::postprocess_interest_rate);
+				}
+				if (found.empty())
+				{
+					found = extract_field_values(f, blocks,
+						search_self_all,
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_interest_rate);
+				}
+
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_section(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name,
+					std::vector<std::pair<cv::Rect, std::wstring>> near_field, int direction, int nth)
+			{
+				if (near_field.empty())
+				{
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+				}
+
+				auto f = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					std::make_tuple(near_field.at(0).first, near_field.at(0).second, cv::Range(0, near_field.at(0).second.size())) };
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+
+				found = extract_field_values(f, blocks,
+					std::bind(find_nth_down_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, nth),
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_section);
+
+				if (found.empty() && nth > 1)
+				{
+					found = extract_field_values(f, blocks,
+						std::bind(find_nth_down_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, nth - 1),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_section);
+				}
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_basic_date(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				/*
+				auto found = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+				std::make_tuple(cv::Rect(), L"", cv::Range())
+				}, blocks,
+				default_search,
+				retirement_document_recognizer::preprocess_company_number,
+				create_extract_function(L"([0-9]{3}-[0-9]{2}-[0-9]{5})"),
+				retirement_document_recognizer::postprocess_company_number);
+				*/
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+					retirement_document_recognizer::preprocess_date,
+					//create_extract_function(L"(20|19)[0-9]{2}[/., ]{0,1}(0[1-9]|1[0-2])[/., ]{0,1}(0[1-9]|1[0-9]|2[0-9]|3[0-1])"),
+					//create_extract_function(L"((20|19)[0-9]{2}[/]{0,1}(0[1-9]|1[0-2])[/]{0,1}(0[1-9]|1[0-9]|2[0-9]|3[0-1]))"), // b
+					default_extract,
+					retirement_document_recognizer::postprocess_date);
+
+				//if (found.size() > 0) {
+				//	found.erase(found.begin() + 1, found.end());
+				//}
+
+				return found;
+			}
+
+			//commercial invoice
+
+			//commercial invoice end
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_expiry_date(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self,
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_expiry_date);
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_expiry_date);
+				}
+				//if (found.size() > 0) {
+				//	found.erase(found.begin() + 1, found.end());
+				//}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_retirement_pay(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+
+				found = extract_field_values(fields.at(field_name), blocks,
+					std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_pay);
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_company_name(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self,
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_company_name);
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_company_name);
+				}
+
+
+
+				//// 대표자 위치를 이용
+				//if (found.empty()) {
+				//	found = extract_field_values(fields.at(L"대표자"), blocks,
+				//		std::bind(find_nearest_left_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+				//		default_preprocess,
+				//		default_extract,
+				//		retirement_document_recognizer::postprocess_company_name);
+				//}
+				//
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_company_name_for_mid(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self,
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_company_name_for_mid);
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_company_name_for_mid);
+				}
+
+				if (found.empty())
+				{
+					found = extract_field_values(fields.at(L"대표자"), blocks,
+						std::bind(find_nearest_left_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_company_name_for_mid);
+				}
+
+
+				//search self로 rect 변화는 없음. search self찾아진 line의 rect 크기를 그대로 가지고 있음.
+				//word or 다른 자료형과 비교하여 관리번호 이후 영역의 rect를 찾거나 임의로 잘라야 함.
+				if (found.empty())
+				{
+					auto management_number = extract_field_values(fields.at(L"관리번호"), blocks,
+						search_self,
+						default_preprocess,
+						default_extract,
+						default_postprocess);
+
+					if (!management_number.empty())
+					{
+						management_number.at(0).first.x = management_number.at(0).first.x + management_number.at(0).first.width / 2;
+
+						auto f = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+							std::make_tuple(management_number.at(0).first, management_number.at(0).second, cv::Range(0, management_number.at(0).second.size())) };
+
+						found = extract_field_values(f, blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+							default_preprocess,
+							default_extract,
+							retirement_document_recognizer::postprocess_company_name_for_mid);
+					}
+				}
+
+				if (found.empty())
+				{
+					auto tel = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, blocks,
+						default_search,
+							retirement_document_recognizer::preprocess_company_number,
+							create_extract_function(L"([0-9]{3}-[0-9]{3}-[0-9]{4})"),
+							default_postprocess);
+
+					std::vector<std::pair<cv::Rect, std::wstring>> tel_;
+					for (auto t : tel)
+					{
+						if (t.first.y > image_size.height*0.2 && t.first.y < image_size.height*0.5)
+							tel_.emplace_back(t);
+					}
+
+					if (!tel_.empty()) {
+						tel_.at(0).first.width = tel_.at(0).first.width / 2;
+						found = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+							std::make_tuple(tel_.at(0).first, tel_.at(0).second, cv::Range(0, tel_.at(0).second.size()))
+						}, blocks,
+							std::bind(find_nearest_up_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+								retirement_document_recognizer::preprocess_company_number,
+								default_extract,
+								retirement_document_recognizer::postprocess_company_name_for_mid);
+					}
+				}
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_loan_period(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+
+				auto found = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					std::make_tuple(cv::Rect(), L"", cv::Range())
+				}, blocks,
+					default_search,
+						retirement_document_recognizer::preprocess_company_number,
+						//create_extract_function(L".*(거지|거치)*.(상환|상한)"),
+						create_extract_function(L"(.*(년|거지|거치){1}.*(년|상환|상한){1})"),
+						retirement_document_recognizer::postprocess_loan_period);
+
+				/*auto found2 = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+				std::make_tuple(cv::Rect(), L"", cv::Range())
+				}, blocks,
+				search_self_all,
+				retirement_document_recognizer::preprocess_company_number,
+				create_extract_function(L".*(년)*.(년)"),
+				retirement_document_recognizer::postprocess_loan_period);
+
+				for (auto f : found2)
+				{
+				if (f.second.length() < 8)
+				continue;
+				found.emplace_back(f);
+				}*/
+
+				if (found.size() > 0) {
+					std::sort(std::begin(found), std::end(found),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						return to_rect(a).y < to_rect(b).y;
+					});
+				}
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_representation(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+				found = extract_field_values(fields.at(field_name), blocks,
+					std::bind(find_far_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_representation);
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_representation);
+				}
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						search_self,
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_representation);
+				}
+
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_representation_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name,
+					std::vector<std::pair<cv::Rect, std::wstring>> near_field, int direction, int nth)
+			{
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+				if (!near_field.empty())
+				{
+					auto f = std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(near_field.at(0).first, near_field.at(0).second, cv::Range(0, near_field.at(0).second.size())) };
+					found = extract_field_values(f, blocks,
+						std::bind(find_far_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_representation);
+				}
+
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				if (found.empty())
+				{
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_far_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_representation);
+					if (found.empty()) {
+						found = extract_field_values(fields.at(field_name), blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							default_preprocess,
+							default_extract,
+							retirement_document_recognizer::postprocess_representation);
+					}
+					if (found.empty()) {
+						found = extract_field_values(fields.at(field_name), blocks,
+							search_self,
+							default_preprocess,
+							default_extract,
+							retirement_document_recognizer::postprocess_representation);
+					}
+				}
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_representation_for_small(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				std::vector<std::pair<cv::Rect, std::wstring>> res;
+				found = extract_field_values(fields.at(field_name), blocks,
+					search_self,
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_representation);
+
+
+				for (auto f : found)
+				{
+					if (f.first.y < image_size.height * 0.4)
+					{
+						res.emplace_back(f);
+					}
+				}
+
+				if (res.empty()) {
+					res = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						retirement_document_recognizer::postprocess_representation);
+				}
+
+
+				if (res.size() > 0) {
+					res.erase(res.begin() + 1, res.end());
+				}
+
+				return res;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_company_number(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				auto found = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					std::make_tuple(cv::Rect(), L"", cv::Range())
+				}, blocks,
+					default_search,//search_self_all
+						retirement_document_recognizer::preprocess_company_number,
+						create_extract_function(L"([0-9]{3}-[0-9]{2}-[0-9]{5})"),
+						retirement_document_recognizer::postprocess_company_number);
+
+				//if (!found.empty())
+				//{
+				//	std::wcout << found.at(0).second << std::endl;
+				//}
+				//std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						search_self,//search_self_all
+						retirement_document_recognizer::preprocess_company_number,
+						//create_extract_function(L"([0-9]{3}-?[0-9]{2}-?[0-9]{5})"),
+						default_extract,
+						retirement_document_recognizer::postprocess_company_number);
+				}
+				if (found.empty()) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						retirement_document_recognizer::preprocess_company_number,
+						//create_extract_function(L"([0-9]{3}-?[0-9]{2}-?[0-9]{5})"),
+						default_extract,
+						retirement_document_recognizer::postprocess_company_number);
+				}
+
+				//위쪽 사업자등록번호가 찐
+				if (category == L"PENSION")
+				{
+					for (auto f : found)
+					{
+						if (f.first.y < image_size.height * 0.33)
+						{
+							std::vector<std::pair<cv::Rect, std::wstring>> a;
+							a.emplace_back(f);
+							return a;
+						}
+					}
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+				}
+
+				if (found.size() > 0) {
+					std::sort(std::begin(found), std::end(found),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						return a.first.y < b.first.y;
+					});
+				}
+				//if (found.size() > 0) {
+				//	found.erase(found.begin() + 1, found.end());
+				//}
+
+				return found;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_basic_downward(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+				found = extract_field_values(fields.at(field_name), blocks,
+					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+					default_preprocess,
+					default_extract,
+					default_postprocess);
+
+
+				//if (product_name.size() > 0) {
+				//	product_name.erase(product_name.begin() + 1, product_name.end());
+				//}
+
+				return found;
+			}
+			//2
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_fund_name(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+				found = extract_field_values(fields.at(field_name), blocks,
+					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+					default_preprocess,
+					default_extract,
+					retirement_document_recognizer::postprocess_fund_name);
+
+				for (auto f : found)
+				{
+					if (image_size.height*0.3 > f.first.y)
+					{
+						std::vector<std::pair<cv::Rect, std::wstring>> a;
+						a.emplace_back(f);
+						return a;
+					}
+				}
+				//if (product_name.size() > 0) {
+				//	product_name.erase(product_name.begin() + 1, product_name.end());
+				//}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_basic_downward_exp(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+				found = extract_field_values(fields.at(field_name), blocks,
+					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 2.0, 100, false, false, false),
+					default_preprocess,
+					default_extract,
+					default_postprocess);
+
+
+				//if (product_name.size() > 0) {
+				//	product_name.erase(product_name.begin() + 1, product_name.end());
+				//}
+
+				return found;
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_basic_downward_date(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+
+				if (category == L"INCOME") {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+						retirement_document_recognizer::preprocess_date,
+						//create_extract_function(L"(20|19)[0-9]{2}[/., ]{0,1}(0[1-9]|1[0-2])[/., ]{0,1}(0[1-9]|1[0-9]|2[0-9]|3[0-1])"),
+						create_extract_function(L"((20|19)[0-9]{2}[/]{0,1}(0[1-9]|1[0-2])[/]{0,1}(0[1-9]|1[0-9]|2[0-9]|3[0-1]))"),
+						default_postprocess);
+				}
+				else if (category == L"PENSION") {
+					found = extract_field_values(fields.at(field_name), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+						retirement_document_recognizer::preprocess_date,
+						//create_extract_function(L"(20|19)[0-9]{2}[/., ]{0,1}(0[1-9]|1[0-2])[/., ]{0,1}(0[1-9]|1[0-9]|2[0-9]|3[0-1])"),
+						create_extract_function(L"((20|19)[0-9]{2}[-]{0,1}(0[1-9]|1[0-2])[-]{0,1}(0[1-9]|1[0-9]|2[0-9]|3[0-1]))"),
+						default_postprocess);
+				}
+				if (found.size() > 0) {
+					found.erase(found.begin() + 1, found.end());
+				}
+
+				return found;
+			}
+
+			static std::tuple<cv::Rect, cv::Rect, cv::Rect>
+				createExtraRects(std::vector<std::pair<cv::Rect, std::wstring>>& creditor,
+					std::vector<std::pair<cv::Rect, std::wstring>>& debtors,
+					std::vector<std::pair<cv::Rect, std::wstring>>& debtor_others)
+			{
+				cv::Rect extra_creditor(0, 0, 0, 0);
+				cv::Rect extra_debtors(0, 0, 0, 0);
+				cv::Rect extra_debtor_others(0, 0, 0, 0);
+
+				if (creditor.size() > 0) {
+					std::sort(std::begin(creditor), std::end(creditor),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						return to_rect(a).y < to_rect(b).y;
+					});
+
+				}
+
+				if (debtors.size() > 0) {
+					std::sort(std::begin(debtors), std::end(debtors),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						return to_rect(a).y < to_rect(b).y;
+					});
+				}
+
+				if (debtor_others.size() > 0) {
+					std::sort(std::begin(debtor_others), std::end(debtor_others),
+						[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+						return to_rect(a).y < to_rect(b).y;
+					});
+				}
+
+
+				if (creditor.size() > 0) {
+					cv::Rect cre_rect = creditor.front().first;
+					if (debtors.size() > 0) {
+						cv::Rect deb_rect = debtors.back().first;
+						extra_creditor = cre_rect;
+						extra_creditor.height = deb_rect.y - extra_creditor.y;
+					}
+					else {
+						extra_creditor = cre_rect;
+						extra_creditor.height = std::numeric_limits<int>::max();
+					}
+				}
+
+				if (debtors.size() > 0) {
+					cv::Rect deb_rect = debtors.front().first;
+					if (debtor_others.size() > 0) {
+						cv::Rect deb_other_rect = debtor_others.back().first;
+						extra_debtors = deb_rect;
+						extra_debtors.height = deb_other_rect.y - extra_debtors.y;
+					}
+					else {
+						extra_debtors = deb_rect;
+						extra_debtors.height = std::numeric_limits<int>::max();
+					}
+				}
+
+				if (debtor_others.size() > 0) {
+					cv::Rect deb_other_rect = debtor_others.back().first;
+					extra_debtor_others = deb_other_rect;
+					extra_debtor_others.height = std::numeric_limits<int>::max();
+				}
+
+				return std::make_tuple(extra_creditor, extra_debtors, extra_debtor_others);
+			}
+
+			static void
+				extract_extra_field(std::vector<std::pair<cv::Rect, std::wstring>>& fields, std::vector<std::pair<cv::Rect, std::wstring>>& extra) {
+				if (extra.size() <= 0) {
+					return;
+				}
+				std::sort(std::begin(extra), std::end(extra),
+					[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+					return to_rect(a).y < to_rect(b).y;
+				});
+				std::vector<std::pair<cv::Rect, std::wstring>> insert_list;
+				for (const auto& field : fields) {
+					cv::Rect field_rect = std::get<0>(field);
+					int field_bottom = field_rect.y + field_rect.height;
+					if (!boost::regex_search(std::get<1>(field), boost::wregex(L"^.?[1|ㅣ]", boost::regex_constants::icase))) {
+						continue;
+					}
+					int pre_number = 1;
+					for (const auto& extra_field : extra) {
+						cv::Rect extra_rect = std::get<0>(extra_field);
+						std::wstring extra_str = std::get<1>(extra_field);
+						if (field_bottom > extra_rect.y) {
+							continue;
+						}
+						auto clean = boost::regex_replace(extra_str, boost::wregex(L"[^0-9]", boost::regex_constants::icase), L"");
+						if (clean.length() > 0) {
+							std::wstring temp;
+							temp += clean[0];
+							if (std::stoi(temp) == pre_number + 1) {
+								insert_list.push_back(extra_field);
+								pre_number++;
+							}
+							else {
+								break;
+							}
+						}
+					}
+				}
+				fields.insert(fields.end(), insert_list.begin(), insert_list.end());
+				std::sort(std::begin(fields), std::end(fields),
+					[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+					return to_rect(a).y < to_rect(b).y;
+				});
+			}
+
+			static void
+				extract_extra_fields(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks,
+					std::vector<std::pair<cv::Rect, std::wstring>>& creditor,
+					std::vector<std::pair<cv::Rect, std::wstring>>& debtors,
+					std::vector<std::pair<cv::Rect, std::wstring>>& debtor_others,
+					const cv::Size& image_size)
 			{
 				auto rects = createExtraRects(creditor, debtors, debtor_others);
 				auto extra_creditors = find_area_lines(std::make_tuple(std::get<0>(rects), L"", cv::Range(0, 0)), blocks, 0.8);
@@ -10867,7 +14770,11 @@ namespace selvy {
 			{
 				throw std::logic_error("not implmented");
 			}
-
+			std::pair<std::unordered_map<std::wstring, std::wstring>, std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>>
+				recognize(const boost::filesystem::path& path, const std::string& secret, const int ignore) override
+			{
+				throw std::logic_error("not implmented");
+			}
 			std::pair<std::wstring, int>
 				recognize(const std::string& buffer, const std::wstring& type, const std::string& secret) override
 			{
@@ -10926,7 +14833,7 @@ namespace selvy {
 					CComPtr<FREngine::IEngineLoader> loader;
 					FREngine::IEnginePtr engine;
 #ifdef __USE_ENGINE__
-					std::tie(loader, engine) = get_engine_object(configuration);
+					std::tie(loader, engine) = get_engine_object(configuration, false);
 #endif
 
 					// for (auto i = range.start; i < range.end; i++) {
@@ -11034,7 +14941,7 @@ namespace selvy {
 					}
 
 #ifdef __USE_ENGINE__
-					release_engine_object(std::make_pair(loader, engine));
+					release_engine_object(std::make_pair(loader, engine), false);
 #endif
 					// } , std::stoi(configuration.at(L"engine").at(L"concurrency")));
 				}
@@ -11047,7 +14954,7 @@ namespace selvy {
 
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
 				recognize(const boost::filesystem::path& path,
-				const std::wstring& class_name) override
+					const std::wstring& class_name) override
 			{
 				throw std::logic_error("not implmented");
 			}
@@ -11075,16 +14982,16 @@ namespace selvy {
 
 			static std::wstring
 				extract_account_bank_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				auto bank_names = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 					std::make_tuple(cv::Rect(), L"", cv::Range())
 				}, blocks,
-				default_search,
-				default_preprocess,
-				create_extract_function(configuration, L"banks", 2),
-				postprocess_account_bank_name);
+					default_search,
+						default_preprocess,
+						create_extract_function(configuration, L"banks", 2),
+						postprocess_account_bank_name);
 
 				return bank_names.size() > 0 ? std::get<1>(bank_names[0]) : L"";
 			}
@@ -11109,16 +15016,16 @@ namespace selvy {
 
 			static std::wstring
 				extract_account_owner_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				auto owner_names = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 					std::make_tuple(cv::Rect(), L"", cv::Range())
 				}, blocks,
-				default_search,
-				default_preprocess,
-				create_extract_function(L"(.*) ?[님림]"),
-				postprocess_account_owner_name);
+					default_search,
+						default_preprocess,
+						create_extract_function(L"(.*) ?[님림]"),
+						postprocess_account_owner_name);
 
 				return owner_names.size() > 0 ? std::get<1>(owner_names[0]) : L"";
 			}
@@ -11145,16 +15052,16 @@ namespace selvy {
 
 			static std::wstring
 				extract_account_number(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				auto numbers = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 					std::make_tuple(cv::Rect(), L"", cv::Range())
 				}, blocks,
-				default_search,
-				preprocess_account_number,
-				create_extract_function(L"([0-9]{2,6} ?- ?[0-9]{2,6} ?-? ?(?:[0-9]{2,6} ?- ?)?[0-9]{2,6})"),
-				postprocess_account_number);
+					default_search,
+						preprocess_account_number,
+						create_extract_function(L"([0-9]{2,6} ?- ?[0-9]{2,6} ?-? ?(?:[0-9]{2,6} ?- ?)?[0-9]{2,6})"),
+						postprocess_account_number);
 
 				if (numbers.size() > 0) {
 					std::wstring longest_number;
@@ -11351,19 +15258,66 @@ namespace selvy {
 				throw std::logic_error("not implmented");
 			}
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
-				recognize(const boost::filesystem::path& path, const std::string& secret) override
+				recognize(const boost::filesystem::path& path, const std::string& secret = "") override
+			{
+				throw std::logic_error("not implmented");
+			}
+			std::pair<std::unordered_map<std::wstring, std::wstring>, std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>>
+				recognize(const boost::filesystem::path& path, const std::string& secret, const int ignore) override
 			{
 				const auto configuration = load_configuration(L"trade");
 				bool is_batch_mode = std::stoi(configuration.at(L"engine").at(L"batchmode"));
-				std::unordered_map<std::wstring, std::vector<std::unordered_map<std::wstring, std::vector<std::wstring>>>> fields;
+				std::unordered_map<std::wstring, std::vector<std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>> fields;
 
 				std::mutex locks;
-				const auto fill_field = [&locks](std::unordered_map<std::wstring, std::vector<std::wstring>>& fields, const std::wstring& field,
-					const std::vector<std::wstring>& value) {
+
+				const auto fill_field = [&locks](std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>& fields, const std::wstring& field,
+					const std::vector<std::pair<cv::Rect, std::wstring>>& value) {
 					locks.lock();
 					if (!value.empty())
 						fields.emplace(std::make_pair(field, value));
 					locks.unlock();
+				};
+
+				std::unordered_map<std::wstring, std::wstring> document_categories;
+				std::mutex category_locks;
+				const auto fill_category = [&category_locks](std::unordered_map<std::wstring, std::wstring>& categories, const std::wstring& file,
+					const std::wstring& value) {
+					category_locks.lock();
+					categories.emplace(std::make_pair(boost::filesystem::path(file).filename().native(), value));
+					category_locks.unlock();
+				};
+
+				std::mutex transform_locks;
+				const auto transform_rect = [&transform_locks](std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>& fields,
+					const cv::Mat& matrix, const cv::Mat& matrix2) {
+					transform_locks.lock();
+					for (auto& field : fields) {
+						for (auto& f : std::get<1>(field)) {
+							auto& rect = std::get<0>(f);
+							std::vector<cv::Point2f> points = {
+								cv::Point2f(rect.x, rect.y),
+								cv::Point2f(rect.br().x, rect.br().y)
+							};
+							cv::perspectiveTransform(points, points, matrix);
+							cv::perspectiveTransform(points, points, matrix2);
+							std::get<0>(f) = cv::Rect(cv::Point(std::min(points[0].x, points[1].x), std::min(points[0].y, points[1].y)),
+								cv::Size(std::abs(points[1].x - points[0].x), std::abs(points[1].y - points[0].y)));
+						}
+					}
+					transform_locks.unlock();
+				};
+
+				std::mutex postproc_locks;
+				const auto postproc_fields = [&postproc_locks](std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>& fields) {
+					postproc_locks.lock();
+					for (auto& field : fields) {
+						for (auto& f : std::get<1>(field)) {
+							auto& value = std::get<1>(f);
+							std::get<1>(f) = boost::regex_replace(value, boost::wregex(L"(CO|COMPANY)(?:,\\. |\\., |\\. |, |\\.|,| )(LTD|LIMITED)", boost::regex_constants::icase), L"CO.,LTD");
+						}
+					}
+					postproc_locks.unlock();
 				};
 
 				std::vector<std::wstring> files;
@@ -11373,99 +15327,127 @@ namespace selvy {
 						const auto file = entry.path();
 						const auto extension = boost::algorithm::to_lower_copy(file.extension().native());
 
-						if (extension != L".png" && extension != L".jpg" && extension != L".tif" && extension != L".jp2")
+						if (extension != L".png" && extension != L".jpg" && extension != L".tif" && extension != L".jp2"&& extension != L".dat")
 							continue;
 
 						files.emplace_back(boost::filesystem::absolute(file).native());
 					}
 
 					std::sort(std::begin(files), std::end(files), compareNat);
-				} else {
+				}
+				else {
 					const auto extension = boost::algorithm::to_lower_copy(path.extension().native());
 
-					if (extension != L".png" && extension != L".jpg" && extension != L".tif" && extension != L".jp2")
-						return std::unordered_map<std::wstring, std::vector<std::wstring>>();
+					if (extension != L".png" && extension != L".jpg" && extension != L".tif" && extension != L".jp2"&& extension != L".dat")
+						return std::make_pair(std::unordered_map<std::wstring, std::wstring>(), std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>());
 
 					files.emplace_back(boost::filesystem::absolute(path).native());
 				}
 
 				try {
-					cv::parallel_for_(cv::Range(0, files.size()), [&](const cv::Range& range) {
+					int max_classification_time = std::stoi(configuration.at(L"service").at(L"classification timeout"));
+					auto thread_count = std::stoi(configuration.at(L"engine").at(L"concurrency"));
+					const auto total = files.size();
+
+					dlib::parallel_for_blocked(thread_count, 0, total, [&](const long start, const long end) {
+#ifndef __NO_FINEREADER__
 						CComPtr<FREngine::IEngineLoader> loader;
 						FREngine::IEnginePtr engine;
-#if __USE_ENGINE__
-						std::tie(loader, engine) = get_engine_object(configuration);
-#endif
+						std::tie(loader, engine) = get_engine_object(configuration, false);
+
 						FREngine::IClassificationEnginePtr classification_engine;
 						FREngine::IModelPtr classification_model;
 
-#if __USE_ENGINE__
 						if (!is_batch_mode) {
 							classification_engine = engine->CreateClassificationEngine();
 							classification_model = classification_engine->
 								CreateModelFromFile(get_classification_model(configuration).c_str());
 						}
 #endif
-						for (auto i = range.start; i < range.end; i++) {
-							memory_reader memory_reader(boost::filesystem::absolute(files[i]), "");
+						for (auto i = start; i < end; i++) {
+							memory_reader memory_reader(boost::filesystem::absolute(files[i]), secret);
 
+							std::wstring class_name;
+							std::vector<block> blocks;
+							cv::Size image_size;
+							cv::Size image_size_pre;
+							double confidence = 0.;
+							auto file_name = boost::filesystem::path(files[i]).filename().native();
+#ifndef __NO_FINEREADER__
 							if (!is_batch_mode && is_document_filtered(memory_reader.decrypted_)) {
 								continue;
 							}
 
 							FREngine::IFRDocumentPtr document;
 							FREngine::IPagePreprocessingParamsPtr page_preprocessing_params;
+							FREngine::ICoordinatesConverterPtr conv_after_opening, conv_after_modification;
 
-							std::wstring category;
-							double confidence = 0.;
-
-							auto file_name = boost::filesystem::path(files[i]).filename().native();
-#if __USE_ENGINE__
 							if (!is_batch_mode) {
 								document = engine->CreateFRDocument();
 								document->AddImageFileFromStream(&memory_reader, nullptr, nullptr, nullptr,
 									boost::filesystem::path(files[i]).filename().native().c_str());
+
 								if (document->Pages->Count < 1) {
 									document->Close();
 									continue;
 								}
+								image_size_pre = cv::Size(document->Pages->Item(0)->ImageDocument->GrayImage->Width, document->Pages->Item(0)->ImageDocument->GrayImage->Height);
+								conv_after_opening = document->Pages->Item(0)->ImageDocument->CoordinatesConverter;
 								page_preprocessing_params = engine->CreatePagePreprocessingParams();
 								page_preprocessing_params->CorrectOrientation = VARIANT_TRUE;
 								page_preprocessing_params->OrientationDetectionParams->put_OrientationDetectionMode(FREngine::OrientationDetectionModeEnum::ODM_Thorough);
 								document->Preprocess(page_preprocessing_params, nullptr, nullptr, nullptr);
+								conv_after_modification = document->Pages->Item(0)->ImageDocument->CoordinatesConverter;
 							}
-#endif
-							std::wstring class_name;
-
+							int classification_time = 0;
 							if (is_batch_mode) {
-							class_name = boost::filesystem::path(files[i]).parent_path().filename().native();
+								class_name = boost::filesystem::path(files[i]).parent_path().filename().native();
 							}
 							else {
-							class_name = classify_document(engine, configuration, classification_engine, classification_model, files[i], document);
+								class_name = classify_document(engine, configuration, classification_engine, classification_model, files[i], document);
 							}
-
-							if (class_name.compare(L"BL") == 0) {
-								class_name = L"BILL OF LADING";
-							}
-							else if (class_name.compare(L"INVOICE") == 0) {
-								class_name = L"COMMERCIAL INVOICE";
-							}
-							else if (class_name.compare(L"LC") == 0) {
-								class_name = L"LETTER OF CREDIT";
-							}
-							else if (class_name.compare(L"PROFORMA") == 0) {
-								class_name = L"COMMERCIAL INVOICE";
-							}
-							else if (class_name.compare(L"ETC") == 0) {
-								class_name = L"BILL OF EXCHANGE";
-							}
-
-							if (!is_batch_mode && class_name.empty()) {
-#if __USE_ENGINE__
+							if (max_classification_time > 10000 && classification_time > max_classification_time) {
 								document->Close();
-#endif
 								continue;
 							}
+							if (!is_batch_mode && class_name.empty()) {
+								document->Close();
+								continue;
+							}
+							image_size = cv::Size(document->Pages->Item(0)->ImageDocument->GrayImage->Width, document->Pages->Item(0)->ImageDocument->GrayImage->Height);
+							int wr = image_size.width * 0.2;
+							int hr = image_size.height * 0.2;
+							std::vector<int> base_coord = { wr, hr, image_size.width - wr, hr, image_size.width - wr, image_size.height - hr, wr, image_size.height - hr };
+							wr = image_size_pre.width * 0.2;
+							hr = image_size_pre.height * 0.2;
+							std::vector<int> base_coord2 = { wr, hr, image_size_pre.width - wr, hr, image_size_pre.width - wr, image_size_pre.height - hr, wr, image_size_pre.height - hr };
+							std::vector<cv::Point2f> base_points = { cv::Point2f(base_coord[0], base_coord[1]),
+								cv::Point2f(base_coord[2], base_coord[3]), cv::Point2f(base_coord[4], base_coord[5]), cv::Point2f(base_coord[6], base_coord[7]) };
+							std::vector<cv::Point2f> base_points2 = { cv::Point2f(base_coord2[0], base_coord2[1]),
+								cv::Point2f(base_coord2[2], base_coord2[3]), cv::Point2f(base_coord2[4], base_coord2[5]), cv::Point2f(base_coord2[6], base_coord2[7]) };
+
+							for (int i = 0; i < 4; i++) {
+								conv_after_opening->ConvertCoordinates(FREngine::ImageTypeEnum::IT_Base,
+									FREngine::ImageTypeEnum::IT_Modified, &base_coord2[i * 2], &base_coord2[i * 2 + 1]);
+								conv_after_modification->ConvertCoordinates(FREngine::ImageTypeEnum::IT_Modified,
+									FREngine::ImageTypeEnum::IT_Base, &base_coord[i * 2], &base_coord[i * 2 + 1]);
+							}
+
+							std::vector<cv::Point2f> modified_points = { cv::Point2f(base_coord[0], base_coord[1]),
+								cv::Point2f(base_coord[2], base_coord[3]), cv::Point2f(base_coord[4], base_coord[5]), cv::Point2f(base_coord[6], base_coord[7]) };
+							std::vector<cv::Point2f> modified_points2 = { cv::Point2f(base_coord2[0], base_coord2[1]),
+								cv::Point2f(base_coord2[2], base_coord2[3]), cv::Point2f(base_coord2[4], base_coord2[5]), cv::Point2f(base_coord2[6], base_coord2[7]) };
+							auto& transform_mat2 = cv::getPerspectiveTransform(base_points, modified_points);
+							auto& transform_mat = cv::getPerspectiveTransform(base_points2, modified_points2);
+#else
+
+							std::tie(class_name, blocks, image_size) = read_cache(files[i]);
+							if (class_name.empty() || blocks.empty()) {
+								continue;
+							}
+#endif
+
+							fill_category(document_categories, files[i], class_name);
 
 							const std::set<std::wstring> processed_class_names{
 								L"AIR WAYBILL",
@@ -11484,24 +15466,27 @@ namespace selvy {
 								L"EXPORT PERMIT",
 								L"CARGO RECEIPT",
 							};
-
+#ifndef __NO_FINEREADER__
 							if (processed_class_names.find(class_name) == processed_class_names.end()) {
-#if __USE_ENGINE__
 								document->Close();
-#endif
 								continue;
 							}
-
-							std::vector<block> blocks;
-							cv::Size image_size;
+							bool is_export = true;
+							if (class_name == L"INSURANCE POLICY" && !is_export) {
+								document->Close();
+								continue;
+							}
 							std::tie(blocks, std::ignore, image_size) = recognize_document(engine, configuration, class_name, files[i], document, true, true, false, true);
-
-							if (image_size.area() == 0)
-								image_size = estimate_paper_size(blocks);
-#if __USE_ENGINE__
 							if (!is_batch_mode)
 								document->Close();
+#else
+							if (processed_class_names.find(class_name) == processed_class_names.end()) {
+								continue;
+							}
 #endif
+							if (image_size.area() == 0)
+								image_size = estimate_paper_size(blocks);
+
 							if (blocks.empty())
 								continue;
 
@@ -11530,68 +15515,84 @@ namespace selvy {
 							const auto keywords = get_keywords(configuration, keywords_, class_name);
 							const auto searched_fields = search_fields(class_name, keywords, blocks);
 
-							std::unordered_map<std::wstring, std::vector<std::wstring>> extracted_fields;
+							std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>> extracted_fields;
 
 							if (class_name == L"BILL OF LADING") {
-								const auto place_of_issue = extract_place_of_issue(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto place_of_receipt = extract_place_of_receipt(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
-								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
-								const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
 								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipping_line = extract_shipping_line(configuration, class_name, searched_fields, blocks, image_size);
-								const auto carrier = extract_carrier(configuration, class_name, searched_fields, blocks, image_size);
-								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
+								const auto place_of_issue = extract_place_of_issue(configuration, class_name, searched_fields, blocks, image_size);
+
+								const auto precarriage_by = extract_precarriage_by(configuration, class_name, searched_fields, blocks, image_size);
 								const auto agent = extract_agent(configuration, class_name, searched_fields, blocks, image_size);
 
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PLACE OF RECEIPT", std::vector<std::wstring>{place_of_receipt});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::wstring>{place_of_delivery});
+
+								const auto carrier = extract_carrier(configuration, searched_fields, blocks, image_size);
+
+								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+
+
+
+								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+								const auto place_of_receipt = extract_place_of_receipt(configuration, class_name, searched_fields, blocks, image_size);
+								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+								const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
+								const auto final_destination = extract_final_destination(configuration, class_name, searched_fields, blocks, image_size);
+
+								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
+								const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
+								const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
+
+								const auto shipping_line = extract_shipping_line(configuration, class_name, searched_fields, blocks, image_size);
+
+								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
+
+								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+								fill_field(extracted_fields, L"PLACE OF RECEIPT", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_receipt});
+								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
+								fill_field(extracted_fields, L"FINAL DESTINATION", std::vector<std::pair<cv::Rect, std::wstring>>{final_destination});
 								fill_field(extracted_fields, L"CONSIGNEE", consignee);
-								fill_field(extracted_fields, L"SHIPEER", shipper);
+								fill_field(extracted_fields, L"SHIPPER", shipper);
 								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"SHIPPING LINE", std::vector<std::wstring>{shipping_line});
-								fill_field(extracted_fields, L"CARRIER", std::vector<std::wstring>{carrier});
-								fill_field(extracted_fields, L"PLACE OF ISSUE", std::vector<std::wstring>{place_of_issue});
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
-								fill_field(extracted_fields, L"AGENT", agent);
-							} else if (class_name == L"CARGO RECEIPT") {
+								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+								fill_field(extracted_fields, L"PRECARRIAGE BY", std::vector<std::pair<cv::Rect, std::wstring>>{precarriage_by});
+								fill_field(extracted_fields, L"SHIPPING LINE", std::vector<std::pair<cv::Rect, std::wstring>>{shipping_line});
+								fill_field(extracted_fields, L"CARRIER", std::vector<std::pair<cv::Rect, std::wstring>>{carrier});
+								fill_field(extracted_fields, L"PLACE OF ISSUE", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), place_of_issue)});
+								fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
+								fill_field(extracted_fields, L"AGENT", std::get<0>(agent));
+								fill_field(extracted_fields, L"AGENT_CC", std::get<1>(agent));
+							}
+							else if (class_name == L"CARGO RECEIPT") {
+								const auto agent = extract_agent(configuration, class_name, searched_fields, blocks, image_size);
+								const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
 								const auto place_of_issue = extract_place_of_issue(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
 								const auto place_of_receipt = extract_place_of_receipt(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
 								const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
 								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
 								const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
 								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
 								const auto shipping_line = extract_shipping_line(configuration, class_name, searched_fields, blocks, image_size);
-								auto agent = extract_agent(configuration, class_name, searched_fields, blocks, image_size);
 
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PLACE OF RECEIPT", std::vector<std::wstring>{place_of_receipt});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::wstring>{place_of_delivery});
+								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+								fill_field(extracted_fields, L"PLACE OF RECEIPT", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_receipt});
+								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
 								fill_field(extracted_fields, L"CONSIGNEE", consignee);
-								fill_field(extracted_fields, L"SHIPEER", shipper);
+								fill_field(extracted_fields, L"SHIPPER", shipper);
 								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"PLACE OF ISSUE", std::vector<std::wstring>{place_of_issue});
-
-								if (!shipping_line.empty()) {
-									agent.insert(agent.begin(), shipping_line[0]);
-								}
-								fill_field(extracted_fields, L"AGENT", agent);
-							} else if (class_name == L"LETTER OF CREDIT") {
+								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+								fill_field(extracted_fields, L"PLACE OF ISSUE", std::vector<std::pair<cv::Rect, std::wstring>>{ std::make_pair(cv::Rect(), place_of_issue)});
+								fill_field(extracted_fields, L"AGENT", std::get<0>(agent));
+								fill_field(extracted_fields, L"AGENT_CC", std::get<1>(agent));
+							}
+							else if (class_name == L"LETTER OF CREDIT") {
+								const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
 								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
 								const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
 								const auto beneficiary = extract_beneficiary(configuration, class_name, searched_fields, blocks, image_size);
-								const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
 
 								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
@@ -11599,24 +15600,26 @@ namespace selvy {
 
 								fill_field(extracted_fields, L"APPLICANT", applicant);
 								fill_field(extracted_fields, L"BENEFICIARY", beneficiary);
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::wstring>{place_of_delivery});
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
+								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
+								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
 								for (const auto& bank : banks) {
 									fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
 								}
-							} else if (class_name == L"COMMERCIAL INVOICE" || class_name == L"PACKING LIST") {
-								/*
-								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
-
+							}
+							else if (class_name == L"COMMERCIAL INVOICE" || class_name == L"PACKING LIST") {
 								const auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
-								const auto buyer = extract_buyer(configuration, class_name, searched_fields, blocks, image_size);
+								const auto lc_number = extract_lc_number(configuration, class_name, searched_fields, blocks, image_size, L"L/C NO");
+								const auto currency_sign = extract_currency_sign(configuration, class_name, searched_fields, blocks, image_size, L"CURRENCY SIGN");
+								const auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size, L"AMOUNT");
+								/*const auto buyer = extract_buyer(configuration, class_name, searched_fields, blocks, image_size);
 								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
 								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
 								const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto exporter = extract_exporter_ex(configuration, class_name, searched_fields, blocks, image_size);
+								const auto exporter = extract_exporter(configuration, class_name, searched_fields, blocks, image_size);
+								const auto beneficiary = extract_beneficiary(configuration, class_name, searched_fields, blocks, image_size);
 								const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
 								const auto manufacturer = extract_manufacturer(configuration, class_name, searched_fields, blocks, image_size);
 								const auto importer = extract_importer(configuration, class_name, searched_fields, blocks, image_size);
@@ -11624,60 +15627,89 @@ namespace selvy {
 								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
 								const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
+								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+								*/
 								fill_field(extracted_fields, L"SELLER", seller);
-								fill_field(extracted_fields, L"BUYER", buyer);
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
+								//fill_field(extracted_fields, L"L/C NO", lc_number);
+								//fill_field(extracted_fields, L"CURRENCY SIGN", currency_sign);
+								//fill_field(extracted_fields, L"AMOUNT", amount);
+
+								/*fill_field(extracted_fields, L"BUYER", buyer);
+								fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
 								fill_field(extracted_fields, L"CONSIGNEE", consignee);
 								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::wstring>{place_of_delivery});
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"EXPORTER", std::vector<std::wstring>{exporter} );
+								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
+								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+								fill_field(extracted_fields, L"EXPORTER", exporter);
 								fill_field(extracted_fields, L"APPLICANT", applicant);
+								fill_field(extracted_fields, L"BENEFICIARY", beneficiary);
 								fill_field(extracted_fields, L"MANUFACTURER", manufacturer);
 								fill_field(extracted_fields, L"IMPORTER", importer);
-								fill_field(extracted_fields, L"GOOD DESCRIPTION", std::vector<std::wstring>{goods});
-								*/
-								
-
-								
-							} else if (class_name == L"BILL OF EXCHANGE") {
-								/*const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
+								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});*/
+							}
+							else if (class_name == L"BILL OF EXCHANGE") {
+								const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
 
 								for (const auto& bank : banks) {
 									fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
-								}*/
-							} else if (class_name == L"EXPORT PERMIT") {
+								}
+							}
+							else if (class_name == L"EXPORT PERMIT") {
 								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
-							} else if (class_name == L"CERTIFICATE OF ORIGIN") {
+								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+							}
+							else if (class_name == L"CERTIFICATE OF ORIGIN") {
+								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
 								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
 								const auto importer = extract_importer(configuration, class_name, searched_fields, blocks, image_size);
+								const auto exporter = extract_exporter(configuration, class_name, searched_fields, blocks, image_size);
+								const auto manufacturer = extract_manufacturer(configuration, class_name, searched_fields, blocks, image_size);
 
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
+								fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
 								fill_field(extracted_fields, L"IMPORTER", importer);
-							} else if (class_name == L"INSURANCE POLICY") {
-								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+								fill_field(extracted_fields, L"EXPORTER", exporter);
+								fill_field(extracted_fields, L"CONSIGNEE", consignee);
+								if (!manufacturer.empty()) {
+									if (exporter.empty())
+										fill_field(extracted_fields, L"MANUFACTURER", manufacturer);
+									else {
+										auto manu = std::get<1>(manufacturer[0]);
+										boost::remove_erase_if(manu, boost::is_any_of(L" .,"));
+										auto ex = std::get<1>(exporter[0]);
+										boost::remove_erase_if(ex, boost::is_any_of(L" .,"));
+
+										if (SymSpell::DamerauLevenshteinDistance(manu, ex) > 2) {
+											fill_field(extracted_fields, L"MANUFACTURER", manufacturer);
+										}
+									}
+								}
+							}
+							else if (class_name == L"INSURANCE POLICY") {
 								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
 								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+
+								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
+								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
+
 								const auto insurance_company = extract_insurance_company(configuration, blocks, image_size);
 								const auto insurance_settling_agent = extract_insurance_company(configuration, searched_fields, blocks, image_size, L"INSURANCE SETTLING AGENT");
 								const auto insurance_survey_agent = extract_insurance_company(configuration, searched_fields, blocks, image_size, L"INSURANCE SURVEY AGENT");
 
-								fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::wstring>{insurance_company});
-								fill_field(extracted_fields, L"INSURANCE SETTLING AGENT", std::vector<std::wstring>{std::get<0>(insurance_settling_agent)});
-								fill_field(extracted_fields, L"INSURANCE SETTLING AGENT_CC", std::vector<std::wstring>{std::get<0>(insurance_settling_agent)});
-								fill_field(extracted_fields, L"INSURANCE SURVEY AGENT", std::vector<std::wstring>{std::get<0>(insurance_survey_agent)});
-								fill_field(extracted_fields, L"INSURANCE SURVEY AGENT_CC", std::vector<std::wstring>{std::get<0>(insurance_survey_agent)});
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
-							} else if (class_name == L"SHIPMENT ADVICE") {
+								fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::pair<cv::Rect, std::wstring>>{insurance_company});
+								fill_field(extracted_fields, L"INSURANCE SETTLING AGENT", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(std::get<0>(insurance_settling_agent), std::get<1>(insurance_settling_agent))});
+								fill_field(extracted_fields, L"INSURANCE SETTLING AGENT_CC", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), std::get<2>(insurance_settling_agent))});
+								fill_field(extracted_fields, L"INSURANCE SURVEY AGENT", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(std::get<0>(insurance_survey_agent), std::get<1>(insurance_survey_agent))});
+								fill_field(extracted_fields, L"INSURANCE SURVEY AGENT_CC", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), std::get<2>(insurance_survey_agent))});
+								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+								fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
+								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+							}
+							else if (class_name == L"SHIPMENT ADVICE") {
 								const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
 								const auto beneficiary = extract_beneficiary(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
@@ -11689,17 +15721,18 @@ namespace selvy {
 
 								fill_field(extracted_fields, L"APPLICANT", applicant);
 								fill_field(extracted_fields, L"BENEFICIARY", beneficiary);
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"SHIPPING LINE", std::vector<std::wstring>{shipping_line});
-								fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::wstring>{std::get<0>(insurance_company)});
-								fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::wstring>{std::get<1>(insurance_company)});
+								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+								fill_field(extracted_fields, L"SHIPPING LINE", std::vector<std::pair<cv::Rect, std::wstring>>{shipping_line});
+								fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(std::get<0>(insurance_company), std::get<1>(insurance_company))});
+								fill_field(extracted_fields, L"INSURANCE COMPANY_CC", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), std::get<2>(insurance_company))});
 
 								for (const auto& bank : banks) {
 									fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
 								}
-							} else if (class_name == L"CERTIFICATE") {
+							}
+							else if (class_name == L"CERTIFICATE") {
 								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
 								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
@@ -11707,13 +15740,15 @@ namespace selvy {
 								const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
 								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
 
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::wstring>{place_of_delivery});
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-							} else if (class_name == L"AIR WAYBILL") {
+								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+								fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
+								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+								fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
+								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+							}
+							else if (class_name == L"AIR WAYBILL") {
+								const auto carrier = extract_airwaybill_carrier(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
 								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
@@ -11722,19 +15757,28 @@ namespace selvy {
 								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
 								const auto agent = extract_agent(configuration, class_name, searched_fields, blocks, image_size);
 
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
+								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
 								fill_field(extracted_fields, L"CONSIGNEE", consignee);
-								fill_field(extracted_fields, L"SHIPEER", shipper);
+								fill_field(extracted_fields, L"SHIPPER", shipper);
 								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"AGENT", agent);
-							} else if (class_name == L"REMITTANCE LETTER") {
-								const auto bank = extract_issuing_bank(configuration, class_name, searched_fields, blocks, image_size);
+								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+								fill_field(extracted_fields, L"AGENT", std::get<0>(agent));
+								fill_field(extracted_fields, L"AGENT_CC", std::get<1>(agent));
+								fill_field(extracted_fields, L"CARRIER", std::vector<std::pair<cv::Rect, std::wstring>>{carrier});
+							}
+							else if (class_name == L"REMITTANCE LETTER") {
+								const auto covering_bank = extract_swift_bank(configuration, blocks, image_size);
+								//const auto issuing_bank = extract_issuing_bank(configuration, class_name, searched_fields, blocks, image_size);
 								const auto drawer = extract_drawer(configuration, class_name, searched_fields, blocks, image_size);
-								fill_field(extracted_fields, L"ISSUING BANK", bank);
+								const auto drawee = extract_drawee(configuration, class_name, searched_fields, blocks, image_size);
+
+								fill_field(extracted_fields, L"COVERING BANK", covering_bank);
+								//fill_field(extracted_fields, L"ISSUING BANK", issuing_bank);
 								fill_field(extracted_fields, L"DRAWER", drawer);
-							} else if (class_name == L"FIRM OFFER") {
+								fill_field(extracted_fields, L"DRAWEE", drawee);
+							}
+							else if (class_name == L"FIRM OFFER") {
 								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
 								const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
 								const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
@@ -11744,13 +15788,14 @@ namespace selvy {
 
 								fill_field(extracted_fields, L"SELLER", seller);
 								fill_field(extracted_fields, L"BUYER", buyer);
-								fill_field(extracted_fields, L"ORIGIN", std::vector<std::wstring>{origin});
+								fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
 								fill_field(extracted_fields, L"APPLICANT", applicant);
 								for (const auto& bank : banks) {
 									fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
 								}
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
-							} else if (class_name == L"LETTER OF GUARANTEE") {
+								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+							}
+							else if (class_name == L"LETTER OF GUARANTEE") {
 								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
 								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
 								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
@@ -11760,43 +15805,70 @@ namespace selvy {
 								const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
 								const auto shipping_company = extract_shipping_company(configuration, class_name, searched_fields, blocks, image_size);
 
-								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::wstring>{port_of_loading});
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
+								fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+								fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
 								fill_field(extracted_fields, L"CONSIGNEE", consignee);
-								fill_field(extracted_fields, L"SHIPEER", shipper);
+								fill_field(extracted_fields, L"SHIPPER", shipper);
 								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::wstring>{goods});
+								fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+								fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
 								fill_field(extracted_fields, L"CARRIER", shipping_company);
 							}
 
-							fill_field(extracted_fields, L"FILE NAME", std::vector<std::wstring>{file_name});
+							fill_field(extracted_fields, L"FILE NAME", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), file_name)});
 
 							processing_ticks.stop();
 							spdlog::get("recognizer")->info("process document : {} ({:.2f}mSec)", to_cp949(boost::filesystem::path(files[i]).filename().native()),
 								processing_ticks.getTimeMilli());
 
-							if (extracted_fields.empty())
+							if (extracted_fields.empty()) {
 								continue;
+							}
+
+							//postproc_fields(extracted_fields);
+#ifndef __NO_FINEREADER__
+							transform_rect(extracted_fields, transform_mat, transform_mat2);
+#endif
+
 
 							if (fields.find(class_name) == fields.end())
-								fields.emplace(class_name, std::vector<std::unordered_map<std::wstring, std::vector<std::wstring>>>());
+								fields.emplace(class_name, std::vector<std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>());
 
 							fields.at(class_name).emplace_back(extracted_fields);
 						}
-
-						release_engine_object(std::make_pair(loader, engine));
-					}, std::stoi(configuration.at(L"engine").at(L"concurrency")));
+#ifndef __NO_FINEREADER__
+						release_engine_object(std::make_pair(loader, engine), false);
+#endif
+					}, 1);
 				}
 				catch (_com_error& e) {
 					spdlog::get("recognizer")->error("exception : {} ({} : {})", to_cp949(e.Description().GetBSTR()), __FILE__, __LINE__);
 				}
 
-				std::unordered_map<std::wstring, std::vector<std::wstring>> extracted_fields;
+				std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>> extracted_fields;
+				std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>> extracted_cc_fields;
 
 				std::vector<std::wstring> others{ L"OTHER1", L"OTHER2", L"OTHER3", L"OTHER7", L"OTHER8", L"OTHER9", L"OTHER10" };
-				const auto fill_others = [&extracted_fields, &others](const std::wstring& field) {
+				const auto check_duplicated_others = [&extracted_fields, &others](const std::wstring& value) {
+					std::unordered_set<std::wstring> other_values;
+					std::transform(std::begin(others), std::end(others), std::inserter(other_values, std::end(other_values)), [&](const std::wstring& field) {
+						if (extracted_fields.find(field) == extracted_fields.end() || std::get<1>(extracted_fields.at(field)).empty())
+							return std::wstring();
+						return std::get<1>(std::get<1>(extracted_fields.at(field))[0]);
+					});
+
+					bool duplicated = (other_values.find(value) != std::end(other_values));
+					return duplicated;
+				};
+
+				const auto fill_others = [&extracted_fields, &extracted_cc_fields, &others, &check_duplicated_others](const std::wstring& field) {
 					if (extracted_fields.find(field) != extracted_fields.end()) {
+						const auto field_value = std::get<1>(extracted_fields.at(field)).empty() ? std::wstring() : std::get<1>(std::get<1>(extracted_fields.at(field))[0]);
+						if (check_duplicated_others(field_value)) {
+							extracted_fields.erase(field);
+							return;
+						}
+
 						if (field == L"MANUFACTURER" && extracted_fields.find(L"OTHER4") == extracted_fields.end()) {
 							extracted_fields.emplace(std::make_pair(L"OTHER4", extracted_fields.at(field)));
 							extracted_fields.erase(field);
@@ -11807,10 +15879,13 @@ namespace selvy {
 							if (extracted_fields.find(other) != extracted_fields.end())
 								continue;
 
-							if (field == L"AGENT" && extracted_fields.at(field).size() > 1) {
-								extracted_fields.emplace(std::make_pair(other, std::vector<std::wstring>{extracted_fields.at(field)[0]}));
-								extracted_fields.at(field).erase(extracted_fields.at(field).begin());
-							} else {
+							if (field == L"AGENT" && std::get<1>(extracted_fields.at(field)).size() > 1) {
+								extracted_fields.emplace(std::make_pair(other, std::make_pair(std::get<0>(extracted_fields.at(field)), std::vector<std::pair<cv::Rect, std::wstring>>{std::get<1>(extracted_fields.at(field))[0]})));
+								extracted_cc_fields.emplace(std::make_pair(other + L"_CC", std::make_pair(std::get<0>(extracted_fields.at(field + L"_CC")), std::vector<std::pair<cv::Rect, std::wstring>>{std::get<1>(extracted_fields.at(field + L"_CC"))[0]})));
+								std::get<1>(extracted_fields.at(field)).erase(std::get<1>(extracted_fields.at(field)).begin());
+								std::get<1>(extracted_fields.at(field + L"_CC")).erase(std::get<1>(extracted_fields.at(field + L"_CC")).begin());
+							}
+							else {
 								extracted_fields.emplace(std::make_pair(other, extracted_fields.at(field)));
 								extracted_fields.erase(field);
 							}
@@ -11818,7 +15893,72 @@ namespace selvy {
 						}
 					}
 				};
-				/*
+
+				const auto fill_others2 = [&extracted_fields, &others, &check_duplicated_others](const std::wstring& field, const std::wstring& file_name, const std::pair<cv::Rect, std::wstring>& value) {
+					std::set<std::wstring> cc_fields{ L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"FINAL DESTINATION" };
+
+					if (extracted_fields.find(field) != extracted_fields.end()) {
+						if (field == L"MANUFACTURER" && extracted_fields.find(L"OTHER4") == extracted_fields.end()) {
+							extracted_fields.emplace(std::make_pair(L"OTHER4", std::make_pair(file_name, std::vector<std::pair<cv::Rect, std::wstring>>{value})));
+							return;
+						}
+
+						for (const auto& other : others) {
+							if (extracted_fields.find(other) != extracted_fields.end())
+								continue;
+
+							if (cc_fields.find(field) == cc_fields.end()) {
+								const auto field_value = std::get<1>(extracted_fields.at(field)).empty() ? std::wstring() : std::get<1>(std::get<1>(extracted_fields.at(field))[0]);
+								if (check_duplicated_others(field_value) || check_duplicated_others(to_wstring(value)))
+									break;
+
+								extracted_fields.emplace(std::make_pair(other, std::make_pair(file_name, std::vector<std::pair<cv::Rect, std::wstring>>{value})));
+							}
+							else {
+								std::vector<std::wstring> values;
+								boost::split(values, std::get<1>(value), boost::is_any_of(L","), boost::algorithm::token_compress_on);
+								if (check_duplicated_others(values[0]))
+									break;
+
+								if (values.size() == 2) {
+									extracted_fields.emplace(std::make_pair(other, std::make_pair(file_name, std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(std::get<0>(value), values[0])})));
+									extracted_fields.emplace(std::make_pair(fmt::format(L"{}_CC", other), std::make_pair(L"", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), values[1])})));
+								}
+								else {
+									extracted_fields.emplace(std::make_pair(other, std::make_pair(file_name, std::vector<std::pair<cv::Rect, std::wstring>>{value})));
+								}
+							}
+							break;
+						}
+					}
+				};
+
+				const auto fill_others3 = [&extracted_fields, &others, &check_duplicated_others](const std::wstring& field, const std::wstring& file_name, const std::pair<cv::Rect, std::wstring>& value, const std::wstring& cc_value) {
+					const auto field_value = std::get<1>(value).empty() ? std::wstring() : std::get<1>(value);
+					if (check_duplicated_others(field_value)) {
+						extracted_fields.erase(field);
+						return;
+					}
+
+					if (extracted_fields.find(field) != extracted_fields.end()) {
+						if (field == L"MANUFACTURER" && extracted_fields.find(L"OTHER4") == extracted_fields.end()) {
+							extracted_fields.emplace(std::make_pair(L"OTHER4", std::make_pair(file_name, std::vector<std::pair<cv::Rect, std::wstring>>{value})));
+							extracted_fields.erase(field);
+							return;
+						}
+
+						for (const auto& other : others) {
+							if (extracted_fields.find(other) != extracted_fields.end())
+								continue;
+
+							extracted_fields.emplace(std::make_pair(other, std::make_pair(file_name, std::vector<std::pair<cv::Rect, std::wstring>>{value})));
+							extracted_fields.emplace(std::make_pair(fmt::format(L"{}_CC", other), std::make_pair(L"", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), cc_value)})));
+							extracted_fields.erase(field);
+							break;
+						}
+					}
+				};
+
 				if (!is_batch_mode) {
 					std::vector<std::wstring> categories = {
 						L"AIR WAYBILL",              //0
@@ -11841,26 +15981,25 @@ namespace selvy {
 					};
 
 					std::unordered_map<std::wstring, std::vector<std::wstring>> key_values = {
-						{ categories[0], { L"PORT OF LOADING", L"PORT OF DISCHARGE", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"AGENT" } },
-						{ categories[1], { L"NEGOTIATION BANK" } },
-						{ categories[2], { L"" } },
-						{ categories[3], { L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"CARRIER", L"PLACE OF ISSUE", L"ORIGIN", L"SHIPPING LINE" } },
-						{ categories[4], { L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"PLACE OF ISSUE" } },
-						{ categories[5], { L"ORIGIN", L"GOODS DESCRIPTION", L"PORT OF LOADING", L"PLACE OF DELIVERY", L"PORT OF DISCHARGE", L"VESSEL NAME", } },
-						{ categories[6], { L"ORIGIN", L"IMPORTER" } },
-						{ categories[7], { L"GOODS DESCRIPTION" } },
-						{ categories[8], { L"INSURANCE COMPANY", L"INSURANCE SETTLING AGENT", L"INSURANCE SURVEY AGENT", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"ORIGIN", L"GOODS DESCRIPTION" } },
-						{ categories[9], { L"ISSUING BANK", L"COLLECTING BANK", L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE" } },
-						{ categories[10], { L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERTY", L"VESSEL NAME" } },
-						{ categories[11], { L"ISSUING BANK", L"DRAWER" } },
-						{ categories[12], { L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"SHIPPING LINE", L"INSURANCE COMPANY" } },
-						{ categories[13], { L"", } },
-						//{ categories[14], { L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"VESSEL NAME" } },
-						{ categories[14],{ L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"VESSEL NAME", L"L/C NO" } },
-						{ categories[15], { L"CARRIER", L"SHOPPER", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"CONSIGNEE", L"GOODS DESCRIPTION", L"NOTIFY" } },
-						{ categories[16], { L"SELLER", L"BUYER", L"ORIGIN", L"APPLICANT", L"COLLECTING BANK" } },
+						{ categories[0],{ L"PORT OF LOADING", L"PORT OF DISCHARGE", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"AGENT" } },
+						{ categories[1],{ L"NEGOTIATION BANK" } },
+						{ categories[2],{ L"" } },
+						{ categories[3],{ L"GOODS DESCRIPTION", L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"FINAL DESTINATION", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"CARRIER", L"PLACE OF ISSUE", L"ORIGIN", L"SHIPPING LINE", L"AGENT" } },
+						{ categories[4],{ L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"PLACE OF ISSUE" } },
+						{ categories[5],{ L"ORIGIN", L"GOODS DESCRIPTION", L"PORT OF LOADING", L"PLACE OF DELIVERY", L"PORT OF DISCHARGE", L"VESSEL NAME", } },
+						{ categories[6],{ L"ORIGIN", L"IMPORTER" } },
+						{ categories[7],{ L"GOODS DESCRIPTION" } },
+						{ categories[8],{ L"INSURANCE COMPANY", L"INSURANCE SETTLING AGENT", L"INSURANCE SURVEY AGENT", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"ORIGIN", L"GOODS DESCRIPTION" } },
+						{ categories[9],{ L"ISSUING BANK", L"COLLECTING BANK", L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE" } },
+						{ categories[10],{ L"GOODS DESCRIPTION", L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"BENEFICIARY", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"VESSEL NAME" } },
+						{ categories[11],{ L"COVERING BANK", L"ISSUING BANK", L"DRAWER" } },
+						{ categories[12],{ L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"SHIPPING LINE", L"INSURANCE COMPANY" } },
+						{ categories[13],{ L"", } },
+						//{ categories[14], { L"GOODS DESCRIPTION", L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"BENEFICIARY", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"VESSEL NAME" } },
+						{ categories[14],{ L"SELLER", L"L/C NUMBER", L"AMOUNT", L"SIGN" } },
+						{ categories[15],{ L"CARRIER", L"SHIPPER", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"CONSIGNEE", L"GOODS DESCRIPTION", L"NOTIFY" } },
+						{ categories[16],{ L"SELLER", L"BUYER", L"ORIGIN", L"APPLICANT", L"COLLECTING BANK" } },
 					};
-					
 					auto cur = time(NULL);
 					auto time = localtime(&cur);
 					auto output_path = fmt::format(L"{}\\result_{:02d}{:02d}.txt", path.parent_path().native(), time->tm_mon + 1, time->tm_mday);
@@ -11877,7 +16016,7 @@ namespace selvy {
 						int count = 1;
 						for (auto& result : category_results) {
 							result_text += fmt::format(L"\"set name\",\"{}\"\n", set_name);
-							result_text += fmt::format(L"\"file name\",\"{}\"\n", result.at(L"FILE NAME").front());
+							result_text += fmt::format(L"\"file name\",\"{}\"\n", std::get<1>(result.at(L"FILE NAME").front()));
 							result_text += fmt::format(L"\"category\",\"{}\"\n", category);
 							result_text += fmt::format(L"\"category number\",\"{}\"\n", count);
 							count++;
@@ -11891,26 +16030,27 @@ namespace selvy {
 								auto& r = result.at(name);
 
 								for (auto& f : r) {
-									result_text += L"\"" + f + L"\",";
+									result_text += L"\"" + std::get<1>(f) + L"\",";
 								}
 								result_text += L"\n";
 							}
 							result_text += L"\n";
 						}
 					}
+#ifdef WRITE_TRADE_TXT
 					std::wofstream txt_file;
-					txt_file.imbue(std::locale(std::locale::locale::empty(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::generate_header>));
+					txt_file.imbue(std::locale(std::locale::empty(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::generate_header>));
 					txt_file.open(output_path, std::wofstream::out | std::wofstream::app);
 					txt_file << result_text << std::endl;
 					txt_file.close();
-					
+#endif
 				}
-*/
-				// TODO:
-				// 랭킹 알고리즘 개발해서 필드값 전달
-				// 그냥 단순하게 제이 처음 나온 필드를 선택하도록 구현됨
 
-				const std::set<std::wstring> category_order{
+				// TODO:
+				// 랭킹 알고리즘 개발해서 필드값 전달 
+				// 그냥 단순하게 제일 처음 나온 필드를 선택하도록 구현됨
+
+				const std::vector<std::wstring> category_order{
 					L"EXPORT PERMIT",
 					L"COMMERCIAL INVOICE",
 					L"PACKING LIST",
@@ -11928,41 +16068,237 @@ namespace selvy {
 					L"LETTER OF GUARANTEE",
 				};
 
-				for (const auto& category : category_order) {
-					if (fields.find(category) != fields.end()) {
-						for (const auto& document : fields.at(category)) {
-							for (const auto& field : document) {
-								const auto field_name = std::get<0>(field);
-								const auto field_values = std::get<1>(field);
-								if (field_name == L"ISSUING BANK" || field_name == L"COLLECTING BANK" || field_name == L"CONSIGNEE" || field_name == L"NEGOTIATION BANK") {
-									bool include_scbank = false;
-									for (auto field_value : field_values) {
-										if (boost::regex_search(field_value, boost::wregex(L"STANDARD CHARTERED", boost::regex::icase))
-											|| boost::regex_search(field_value, boost::wregex(L"STANDARD CHART", boost::regex::icase))
-											|| boost::regex_search(field_value, boost::wregex(L"스(?:탠|턴)다드"))
-											|| boost::regex_search(field_value, boost::wregex(L"차타드"))) {
-											include_scbank = true;
+				if (fields.find(L"BILL OF LADING") != fields.end()) {
+					if (fields.find(L"COMMERCIAL INVOICE") != fields.end()) {
+						for (const auto& document : fields.at(L"BILL OF LADING")) {
+							if (document.find(L"NOTIFY") != document.end() && !document.at(L"NOTIFY").empty()) {
+								auto invoices = fields.at(L"COMMERCIAL INVOICE");
+								bool is_extracted = false;
+								for (const auto& invoice : invoices) {
+									if (invoice.find(L"NOTIFY") != invoice.end() && !invoice.at(L"NOTIFY").empty()) {
+										auto str1 = to_wstring(document.at(L"NOTIFY")[0]);
+										auto str2 = to_wstring(invoice.at(L"NOTIFY")[0]);
+										boost::remove_erase_if(str1, boost::is_any_of(L" .,"));
+										boost::remove_erase_if(str2, boost::is_any_of(L" .,"));
+										if (SymSpell::DamerauLevenshteinDistance(str1, str2) > 2) {
+											extracted_fields.emplace(std::make_pair(L"NOTIFY", std::make_pair(to_wstring(document.at(L"FILE NAME")), document.at(L"NOTIFY"))));
+											is_extracted = true;
 											break;
 										}
 									}
-									if (include_scbank)
+								}
+								if (is_extracted)
+									break;
+							}
+						}
+					}
+					else {
+						for (const auto& document : fields.at(L"BILL OF LADING")) {
+							if (document.find(L"NOTIFY") != document.end()) {
+								extracted_fields.emplace(std::make_pair(L"NOTIFY", std::make_pair(to_wstring(document.at(L"FILE NAME")), document.at(L"NOTIFY"))));
+								break;
+							}
+						}
+					}
+
+					std::vector<std::wstring> bl_first_keywords{ L"VESSEL NAME", L"CONSIGNEE", L"PORT OF LOADING", L"PORT OF DISCHARGE" };
+					for (const auto& keyword : bl_first_keywords) {
+						for (const auto& document : fields.at(L"BILL OF LADING")) {
+							std::wstring file_name = L"";
+
+							if (document.find(L"FILE NAME") != document.end()) {
+								file_name = to_wstring(document.at(L"FILE NAME"));
+							}
+
+							if (document.find(keyword) != document.end()) {
+								if (to_wstring(document.at(keyword)).empty())
+									continue;
+
+								if (keyword == L"CONSIGNEE") {
+									bool except_bank = false;
+									for (auto& field_value : document.at(keyword)) {
+										if (boost::regex_search(std::get<1>(field_value), boost::wregex(L"STANDARD ?CHARTERED", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"STANDARD ?CHA", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"OF STANDARD", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"STANDARD AKTERED", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"CHARTERED", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"SC ?FIRST", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"NAME,ADDRESS", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"HEREBY ENCLOSE", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"^MAIL TO", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"^TENOR", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"TENOR$", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"^APPLICANT", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"STANDARD (?:대|CIL)ART", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"스(?:탠|턴)다드"))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"차타드"))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"INVOICE", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"SWIFT ", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"DATED", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"LC REF", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"차타드", boost::regex::icase))
+											|| std::get<1>(field_value) == L"LOT" || std::get<1>(field_value) == L"LOT.") {
+											except_bank = true;
+											break;
+										}
+									}
+									if (!except_bank) {
+										extracted_fields.emplace(std::make_pair(keyword, std::make_pair(file_name, document.at(keyword))));
+									}
+								}
+								else {
+									extracted_fields.emplace(std::make_pair(keyword, std::make_pair(file_name, document.at(keyword))));
+								}
+
+								break;
+							}
+						}
+					}
+				}
+
+				std::vector<std::wstring> replace_beneficiary_companies = { L"LG CHEM.,LTD.", L"LOTTE CHEMICAL CORPORATION" };
+				if (fields.find(L"LETTER OF CREDIT") != fields.end() && fields.find(L"COMMERCIAL INVOICE") != fields.end()) {
+					for (const auto& document : fields.at(L"LETTER OF CREDIT")) {
+						if (document.find(L"BENEFICIARY") != document.end()) {
+							auto bene = document.at(L"BENEFICIARY");
+							if (!bene.empty()) {
+								bool is_include_replace_companies = false;
+								for (auto& company : replace_beneficiary_companies) {
+									auto str1 = to_wstring(bene[0]);
+									auto str2 = company;
+									boost::remove_erase_if(str1, boost::is_any_of(L" .,"));
+									boost::remove_erase_if(str2, boost::is_any_of(L" .,"));
+									if (SymSpell::DamerauLevenshteinDistance(str1, str2) < 2) {
+										is_include_replace_companies = true;
+										break;
+									}
+								}
+								if (!is_include_replace_companies)
+									continue;
+								bool is_extracted = false;
+								auto invoices = fields.at(L"COMMERCIAL INVOICE");
+								for (const auto& invoice : invoices) {
+									if (invoice.find(L"SELLER") != invoice.end()) {
+										auto invo = invoice.at(L"SELLER");
+										if (!invo.empty()) {
+											extracted_fields.emplace(std::make_pair(L"BENEFICIARY", std::make_pair(to_wstring(invoice.at(L"FILE NAME")), invo)));
+											is_extracted = true;
+											break;
+										}
+									}
+									else if (invoice.find(L"EXPORTER") != invoice.end()) {
+										auto invo = invoice.at(L"EXPORTER");
+										if (!invo.empty()) {
+											extracted_fields.emplace(std::make_pair(L"BENEFICIARY", std::make_pair(to_wstring(invoice.at(L"FILE NAME")), invo)));
+											is_extracted = true;
+											break;
+										}
+									}
+								}
+								if (is_extracted) {
+									break;
+								}
+							}
+						}
+					}
+				}
+				if (fields.find(L"LETTER OF CREDIT") != fields.end()) {
+					for (const auto& document : fields.at(L"LETTER OF CREDIT")) {
+						if (document.find(L"APPLICANT") != document.end()) {
+							auto applicant = document.at(L"APPLICANT");
+							if (!applicant.empty() && extracted_fields.find(L"APPLICANT") == extracted_fields.end()) {
+								extracted_fields.emplace(std::make_pair(L"APPLICANT", std::make_pair(to_wstring(document.at(L"FILE NAME")), applicant)));
+							}
+						}
+						/*if (document.find(L"BENEFICIARY") != document.end()) {
+						auto beneficiary = document.at(L"BENEFICIARY");
+						if (!beneficiary.empty() && extracted_fields.find(L"BENEFICIARY") == extracted_fields.end()) {
+						extracted_fields.emplace(std::make_pair(L"BENEFICIARY",std::make_pair(to_wstring(document.at(L"FILE NAME")), beneficiary)));
+						}
+						}*/
+					}
+				}
+
+				std::set<std::wstring> duplicated_fields{
+					L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"FINAL DESTINATION", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"CARRIER", L"SHIPPING LINE", L"MANUFACTURER",
+				};
+
+				std::unordered_map<std::wstring, std::pair<std::wstring, std::unordered_set<std::pair<cv::Rect, std::wstring>>>> others_fields;
+				for (const auto& category : category_order) {
+					if (fields.find(category) != fields.end()) {
+						for (const auto& document : fields.at(category)) {
+							std::wstring file_name = L"";
+							if (document.find(L"FILE NAME") != document.end()) {
+								file_name = to_wstring(document.at(L"FILE NAME"));
+							}
+							for (const auto& field : document) {
+								const auto field_name = std::get<0>(field);
+								const auto field_values = std::get<1>(field);
+
+								if (field_name == L"FILE NAME")
+									continue;
+								if (field_name != L"AGENT_CC") {
+									if (field_values.size() == 1 && std::get<1>(field_values[0]).empty())
 										continue;
 								}
 
-								if (field_values.size() == 1 && field_values[0].empty())
+								if (boost::regex_search(std::get<1>(field_values[0]), boost::wregex(L"(?:SAME (?:AS)? (?:ABOVE|BELOW|CONSIGNEE)|IF OTHER THAN BUYER)")))
 									continue;
 
-								if (boost::regex_search(field_values[0], boost::wregex(L"SAME (?:AS)? (?:ABOVE|BELOW|CONSIGNEE)")))
-									continue;
+								if (field_name == L"COVERING BANK" || field_name == L"ISSUING BANK" || field_name == L"COLLECTING BANK" || field_name == L"CONSIGNEE" || field_name == L"NEGOTIATION BANK") {
+									bool except_banks = false;
+									for (auto field_value : field_values) {
+										if (boost::regex_search(std::get<1>(field_value), boost::wregex(L"STANDARD ?CHARTERED", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"STANDARD ?CHA", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"OF STANDARD", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"STANDARD AKTERED", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"CHARTERED", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"SC ?FIRST", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"NAME,ADDRESS", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"HEREBY ENCLOSE", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"^MAIL TO", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"^TENOR", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"TENOR$", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"^APPLICANT", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"STANDARD (?:대|CIL)ART", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"스(?:탠|턴)다드"))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"차타드"))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"INVOICE", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"SWIFT ", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"^SWIFT$", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"DATED", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"LC REF", boost::regex::icase))
+											|| boost::regex_search(std::get<1>(field_value), boost::wregex(L"차타드", boost::regex::icase))
+											|| std::get<1>(field_value) == L"LOT" || std::get<1>(field_value) == L"LOT.") {
+											except_banks = true;
+											break;
+										}
+										else if (field_values.size() == 1 && (std::get<1>(field_value) == L"LIMITED" || std::get<1>(field_value) == L"BANK" || std::get<1>(field_value) == L"YOU")) {
+											except_banks = true;
+											break;
+										}
+									}
+									if (except_banks)
+										continue;
+								}
+
+								/*if (category == L"BILL OF LADING" || category == L"COMMERCIAL INVOICE" || field_name == L"MANUFACTURER"
+								|| (category == L"AIR WAYBILL" && (field_name == L"PORT OF LOADING" || field_name == L"PORT OF DISCHARGE"))) {
+								if (duplicated_fields.find(field_name) != duplicated_fields.end()) {
+								if (others_fields.find(field_name) == others_fields.end())
+								others_fields.emplace(std::make_pair(field_name, std::make_pair(file_name, std::unordered_set<std::pair<cv::Rect, std::wstring>>())));
+								std::get<1>(others_fields.at(field_name)).emplace(field_values[0]);
+								}
+								}*/
 
 								if (extracted_fields.find(field_name) == extracted_fields.end())
-									extracted_fields.emplace(std::make_pair(field_name, field_values));
+									extracted_fields.emplace(std::make_pair(field_name, std::make_pair(file_name, field_values)));
 								else {
-									if (extracted_fields.at(field_name).size() < 3
-										&& extracted_fields.at(field_name).size() < field_values.size()
+									if (std::get<1>(extracted_fields.at(field_name)).size() < 3
+										&& std::get<1>(extracted_fields.at(field_name)).size() < field_values.size()
 										&& field_name != L"ISSUING BANK") {
 										extracted_fields.erase(field_name);
-										extracted_fields.emplace(std::make_pair(field_name, field_values));
+										extracted_fields.emplace(std::make_pair(field_name, std::make_pair(file_name, field_values)));
 									}
 								}
 							}
@@ -11970,75 +16306,340 @@ namespace selvy {
 					}
 				}
 
+				/*for (auto it = std::begin(others_fields); it != std::end(others_fields);) {
+				if (std::get<1>(it->second).size() <= 1) {
+				it = others_fields.erase(it);
+				} else {
+				it++;
+				}
+				}*/
+
+				/*for (const auto& field : extracted_fields) {
+				const auto field_value = std::get<1>(std::get<1>(field));
+				for (auto& other : others_fields) {
+				auto& other_values = std::get<1>(std::get<1>(other));
+				for (auto& value : field_value) {
+				for (auto it = std::begin(other_values); it != std::end(other_values);) {
+				if (get_levenstein_distance(std::get<1>(*it), std::get<1>(value), true) < 3) {
+				it = other_values.erase(it);
+				} else {
+				it++;
+				}
+				}
+				}
+
+				}
+				}*/
+
 				if (!is_batch_mode) {
+					const auto match_company = [&](const std::pair<cv::Rect, std::wstring>& company) {
+						const auto keywords = get_dictionary_words(configuration, dictionaries_, L"registered_companies");
+						const auto dictionary = build_spell_dictionary(configuration, L"registered_companies");
+						aho_corasick::wtrie trie;
+						build_trie(trie, keywords);
+
+						std::wstring company_name = std::get<1>(company);
+						auto suggested = dictionary->Correct(company_name);
+						if (!suggested.empty()) {
+							company_name = suggested[0].term;
+						}
+						else {
+							if (company_name.back() == L'.') {
+								company_name.resize(company_name.size() - 1);
+							}
+							else {
+								company_name += L'.';
+							}
+
+							suggested = dictionary->Correct(company_name);
+
+							if (!suggested.empty()) {
+								company_name = suggested[0].term;
+							}
+							else {
+								company_name = std::get<1>(company);
+							}
+						}
+						return std::make_pair(std::get<0>(company), postprocess_uppercase(company_name));
+					};
+
 					if (extracted_fields.find(L"BENEFICIARY") == extracted_fields.end()) {
 						if (extracted_fields.find(L"SELLER") != extracted_fields.end()) {
 							extracted_fields.emplace(std::make_pair(L"BENEFICIARY", extracted_fields.at(L"SELLER")));
 							extracted_fields.erase(L"SELLER");
-						} else if (extracted_fields.find(L"EXPORTER") != extracted_fields.end()) {
+						}
+						else if (extracted_fields.find(L"EXPORTER") != extracted_fields.end()) {
 							extracted_fields.emplace(std::make_pair(L"BENEFICIARY", extracted_fields.at(L"EXPORTER")));
 							extracted_fields.erase(L"EXPORTER");
-						} else if (extracted_fields.find(L"SHIPPER") != extracted_fields.end()) {
+						}
+						else if (extracted_fields.find(L"SHIPPER") != extracted_fields.end()) {
 							extracted_fields.emplace(std::make_pair(L"BENEFICIARY", extracted_fields.at(L"SHIPPER")));
 							extracted_fields.erase(L"SHIPPER");
-						} else if (extracted_fields.find(L"DRAWER") != extracted_fields.end()) {
+						}
+						else if (extracted_fields.find(L"DRAWER") != extracted_fields.end()) {
 							extracted_fields.emplace(std::make_pair(L"BENEFICIARY", extracted_fields.at(L"DRAWER")));
 							extracted_fields.erase(L"DRAWER");
 						}
+					}
+
+					if (extracted_fields.find(L"BENEFICIARY") != extracted_fields.end()) {
+						std::get<1>(extracted_fields.at(L"BENEFICIARY"))[0] = match_company(std::get<1>(extracted_fields.at(L"BENEFICIARY"))[0]);
 					}
 
 					if (extracted_fields.find(L"APPLICANT") == extracted_fields.end()) {
 						if (extracted_fields.find(L"BUYER") != extracted_fields.end()) {
 							extracted_fields.emplace(std::make_pair(L"APPLICANT", extracted_fields.at(L"BUYER")));
 							extracted_fields.erase(L"BUYER");
-						} else if (extracted_fields.find(L"DRAWEE") != extracted_fields.end()) {
+						}
+						else if (extracted_fields.find(L"DRAWEE") != extracted_fields.end()) {
 							extracted_fields.emplace(std::make_pair(L"APPLICANT", extracted_fields.at(L"DRAWEE")));
 							extracted_fields.erase(L"DRAWEE");
-						} else if (extracted_fields.find(L"IMPORTER") != extracted_fields.end()) {
+						}
+						else if (extracted_fields.find(L"IMPORTER") != extracted_fields.end()) {
 							extracted_fields.emplace(std::make_pair(L"APPLICANT", extracted_fields.at(L"IMPORTER")));
 							extracted_fields.erase(L"IMPORTER");
 						}
 					}
 
+					if (extracted_fields.find(L"APPLICANT") != extracted_fields.end()) {
+						std::get<1>(extracted_fields.at(L"APPLICANT"))[0] = match_company(std::get<1>(extracted_fields.at(L"APPLICANT"))[0]);
+					}
+
 					if (extracted_fields.find(L"SHIPPER") != extracted_fields.end() &&
 						extracted_fields.find(L"BENEFICIARY") != extracted_fields.end()) {
-						auto shipper = extracted_fields.at(L"SHIPPER")[0];
+						auto shipper = to_wstring(std::get<1>(extracted_fields.at(L"SHIPPER"))[0]);
 						boost::remove_erase_if(shipper, boost::is_any_of(L" .,"));
-						auto beneficiary = extracted_fields.at(L"BENEFICIARY")[0];
+						auto beneficiary = to_wstring(std::get<1>(extracted_fields.at(L"BENEFICIARY"))[0]);
 						boost::remove_erase_if(beneficiary, boost::is_any_of(L" .,"));
 
-						if (SymSpell::DamerauLevenshteinDistance(shipper, beneficiary) < 2) {
-							if (extracted_fields.at(L"BENEFICIARY").size() < extracted_fields.at(L"SHIPPER").size()) {
+						bool is_erased = false;
+						if (get_levenstein_distance(shipper, beneficiary, true) < 3) {
+							if (std::get<1>(extracted_fields.at(L"BENEFICIARY")).size() < 3 && std::get<1>(extracted_fields.at(L"BENEFICIARY")).size() < std::get<1>(extracted_fields.at(L"SHIPPER")).size()) {
 								extracted_fields.erase(L"BENEFICIARY");
 								extracted_fields.emplace(std::make_pair(L"BENEFICIARY", extracted_fields.at(L"SHIPPER")));
 							}
 							extracted_fields.erase(L"SHIPPER");
+							is_erased = true;
+						}
+
+						if (!is_erased && std::get<1>(extracted_fields.at(L"BENEFICIARY")).size() > 1) {
+							beneficiary = to_wstring(std::get<1>(extracted_fields.at(L"BENEFICIARY"))[1]);
+							boost::remove_erase_if(beneficiary, boost::is_any_of(L" .,"));
+							if (beneficiary.size() > 9 && shipper.size() > 9) {
+								beneficiary.resize(10);
+								shipper.resize(10);
+							}
+							if (get_levenstein_distance(shipper, beneficiary) < 3) {
+								extracted_fields.erase(L"SHIPPER");
+							}
+						}
+					}
+
+					if (extracted_fields.find(L"SHIPPING LINE") != extracted_fields.end() &&
+						extracted_fields.find(L"NOTIFY") != extracted_fields.end()) {
+						auto notify = to_wstring(std::get<1>(extracted_fields.at(L"NOTIFY"))[0]);
+						boost::remove_erase_if(notify, boost::is_any_of(L" .,"));
+						auto shipping_line = to_wstring(std::get<1>(extracted_fields.at(L"SHIPPING LINE"))[0]);
+						boost::remove_erase_if(shipping_line, boost::is_any_of(L" .,"));
+
+						if (SymSpell::DamerauLevenshteinDistance(notify, shipping_line) < 2) {
+							extracted_fields.erase(L"SHIPPING LINE");
+						}
+					}
+
+					auto is_swift_code = [](const std::pair<cv::Rect, std::wstring>& field) {
+						const auto str = std::get<1>(field);
+						if (boost::regex_search(str, boost::wregex(L"[^A-Z0-9]", boost::regex_constants::icase)))
+							return false;
+						return str.size() == 8 || str.size() == 11;
+					};
+
+					if (extracted_fields.find(L"NOTIFY") != extracted_fields.end() &&
+						std::get<1>(extracted_fields.at(L"NOTIFY")).size() > 1 &&
+						is_swift_code(std::get<1>(extracted_fields.at(L"NOTIFY"))[0]) &&
+						boost::regex_search(to_wstring(std::get<1>(extracted_fields.at(L"NOTIFY"))[1]), boost::wregex(L"BANK", boost::regex_constants::icase))) {
+						boost::remove_erase(std::get<1>(extracted_fields.at(L"NOTIFY")), std::get<1>(extracted_fields.at(L"NOTIFY"))[0]);
+					}
+
+					for (const auto& bank : { L"COVERING BANK", L"ISSUING BANK", L"COLLECTING BANK", L"NEGOTIATION BANK" }) {
+						if (extracted_fields.find(L"NOTIFY") != extracted_fields.end() &&
+							extracted_fields.find(bank) != extracted_fields.end()) {
+							auto notify = to_wstring(std::get<1>(extracted_fields.at(L"NOTIFY"))[0]);
+							boost::remove_erase_if(notify, boost::is_any_of(L" .,"));
+							auto bank_name = to_wstring(std::get<1>(extracted_fields.at(bank))[0]);
+							boost::remove_erase_if(bank_name, boost::is_any_of(L" .,"));
+
+							if (SymSpell::DamerauLevenshteinDistance(notify, bank_name) < 2) {
+								extracted_fields.erase(L"NOTIFY");
+							}
+						}
+					}
+
+					for (const auto& bank : { L"COVERING BANK", L"ISSUING BANK", L"COLLECTING BANK", L"NEGOTIATION BANK" }) {
+						if (extracted_fields.find(L"CONSIGNEE") != extracted_fields.end() &&
+							extracted_fields.find(bank) != extracted_fields.end()) {
+							auto consignee = to_wstring(std::get<1>(extracted_fields.at(L"CONSIGNEE"))[0]);
+							boost::remove_erase_if(consignee, boost::is_any_of(L" .,"));
+							auto bank_name = to_wstring(std::get<1>(extracted_fields.at(bank))[0]);
+							boost::remove_erase_if(bank_name, boost::is_any_of(L" .,"));
+							int min_size = bank_name.size() > consignee.size() ? consignee.size() : bank_name.size();
+							if (min_size > 10) {
+								bank_name.resize(min_size);
+								consignee.resize(min_size);
+							}
+
+							if (SymSpell::DamerauLevenshteinDistance(consignee, bank_name) < 2) {
+								extracted_fields.erase(L"CONSIGNEE");
+							}
+							else if (std::get<1>(extracted_fields.at(bank)).size() > 1) {
+								consignee = to_wstring(std::get<1>(extracted_fields.at(L"CONSIGNEE"))[0]);
+								boost::remove_erase_if(consignee, boost::is_any_of(L" .,"));
+								bank_name = to_wstring(std::get<1>(extracted_fields.at(bank))[1]);
+								boost::remove_erase_if(bank_name, boost::is_any_of(L" .,"));
+								int min_size = bank_name.size() > consignee.size() ? consignee.size() : bank_name.size();
+								if (min_size > 10) {
+									bank_name.resize(min_size);
+									consignee.resize(min_size);
+								}
+								if (SymSpell::DamerauLevenshteinDistance(consignee, bank_name) < 2) {
+									extracted_fields.erase(L"CONSIGNEE");
+								}
+							}
+						}
+					}
+
+					if (extracted_fields.find(L"SHIPPING LINE") != extracted_fields.end() &&
+						extracted_fields.find(L"APPLICANT") != extracted_fields.end()) {
+						auto shipping_line = to_wstring(std::get<1>(extracted_fields.at(L"SHIPPING LINE"))[0]);
+						boost::remove_erase_if(shipping_line, boost::is_any_of(L" .,"));
+						auto applicant = to_wstring(std::get<1>(extracted_fields.at(L"APPLICANT"))[0]);
+						boost::remove_erase_if(applicant, boost::is_any_of(L" .,"));
+
+						if (SymSpell::DamerauLevenshteinDistance(shipping_line, applicant) < 2) {
+							extracted_fields.erase(L"SHIPPING LINE");
 						}
 					}
 
 					if (extracted_fields.find(L"NOTIFY") != extracted_fields.end() &&
 						extracted_fields.find(L"APPLICANT") != extracted_fields.end()) {
-						auto notify = extracted_fields.at(L"NOTIFY")[0];
+						auto notify = to_wstring(std::get<1>(extracted_fields.at(L"NOTIFY"))[0]);
 						boost::remove_erase_if(notify, boost::is_any_of(L" .,"));
-						auto applicant = extracted_fields.at(L"APPLICANT")[0];
+						auto applicant = to_wstring(std::get<1>(extracted_fields.at(L"APPLICANT"))[0]);
 						boost::remove_erase_if(applicant, boost::is_any_of(L" .,"));
 
 						if (SymSpell::DamerauLevenshteinDistance(notify, applicant) < 2) {
 							extracted_fields.erase(L"NOTIFY");
 						}
 					}
+					if (extracted_fields.find(L"CONSIGNEE") != extracted_fields.end() &&
+						extracted_fields.find(L"NOTIFY") != extracted_fields.end()) {
+						auto consignee = to_wstring(std::get<1>(extracted_fields.at(L"CONSIGNEE"))[0]);
+						boost::remove_erase_if(consignee, boost::is_any_of(L" .,"));
+						auto notify = to_wstring(std::get<1>(extracted_fields.at(L"NOTIFY"))[0]);
+						boost::remove_erase_if(notify, boost::is_any_of(L" .,"));
+
+						if (SymSpell::DamerauLevenshteinDistance(consignee, notify) < 2) {
+							extracted_fields.erase(L"CONSIGNEE");
+						}
+					}
+
+					if (extracted_fields.find(L"CONSIGNEE") != extracted_fields.end() &&
+						extracted_fields.find(L"APPLICANT") != extracted_fields.end()) {
+						auto consignee = to_wstring(std::get<1>(extracted_fields.at(L"CONSIGNEE"))[0]);
+						boost::remove_erase_if(consignee, boost::is_any_of(L" .,"));
+						auto applicant = to_wstring(std::get<1>(extracted_fields.at(L"APPLICANT"))[0]);
+						boost::remove_erase_if(applicant, boost::is_any_of(L" .,"));
+
+						if (SymSpell::DamerauLevenshteinDistance(consignee, applicant) < 2) {
+							extracted_fields.erase(L"CONSIGNEE");
+						}
+					}
+					if (extracted_fields.find(L"PLACE OF RECEIPT") != extracted_fields.end() &&
+						extracted_fields.find(L"PORT OF LOADING") != extracted_fields.end()) {
+						auto pol = to_wstring(std::get<1>(extracted_fields.at(L"PORT OF LOADING"))[0]);
+						boost::remove_erase_if(pol, boost::is_any_of(L" .,"));
+						auto por = to_wstring(std::get<1>(extracted_fields.at(L"PLACE OF RECEIPT"))[0]);
+						boost::remove_erase_if(por, boost::is_any_of(L" .,"));
+
+						if (SymSpell::DamerauLevenshteinDistance(pol, por) < 2) {
+							extracted_fields.erase(L"PLACE OF RECEIPT");
+						}
+					}
+
+					if (extracted_fields.find(L"PLACE OF DELIVERY") != extracted_fields.end() &&
+						extracted_fields.find(L"PORT OF DISCHARGE") != extracted_fields.end()) {
+						auto pol = to_wstring(std::get<1>(extracted_fields.at(L"PORT OF DISCHARGE"))[0]);
+						boost::remove_erase_if(pol, boost::is_any_of(L" .,"));
+						auto por = to_wstring(std::get<1>(extracted_fields.at(L"PLACE OF DELIVERY"))[0]);
+						boost::remove_erase_if(por, boost::is_any_of(L" .,"));
+
+						if (SymSpell::DamerauLevenshteinDistance(pol, por) < 2) {
+							extracted_fields.erase(L"PLACE OF DELIVERY");
+						}
+					}
+
+					if (extracted_fields.find(L"FINAL DESTINATION") != extracted_fields.end() &&
+						extracted_fields.find(L"PORT OF DISCHARGE") != extracted_fields.end()) {
+						auto pol = to_wstring(std::get<1>(extracted_fields.at(L"PORT OF DISCHARGE"))[0]);
+						boost::remove_erase_if(pol, boost::is_any_of(L" .,"));
+						auto por = to_wstring(std::get<1>(extracted_fields.at(L"FINAL DESTINATION"))[0]);
+						boost::remove_erase_if(por, boost::is_any_of(L" .,"));
+
+						if (SymSpell::DamerauLevenshteinDistance(pol, por) < 2) {
+							extracted_fields.erase(L"FINAL DESTINATION");
+						}
+					}
+
+					if (extracted_fields.find(L"FINAL DESTINATION") != extracted_fields.end() &&
+						extracted_fields.find(L"PLACE OF DELIVERY") != extracted_fields.end()) {
+						auto pol = to_wstring(std::get<1>(extracted_fields.at(L"PLACE OF DELIVERY"))[0]);
+						boost::remove_erase_if(pol, boost::is_any_of(L" .,"));
+						auto por = to_wstring(std::get<1>(extracted_fields.at(L"FINAL DESTINATION"))[0]);
+						boost::remove_erase_if(por, boost::is_any_of(L" .,"));
+
+						if (SymSpell::DamerauLevenshteinDistance(pol, por) < 2) {
+							extracted_fields.erase(L"FINAL DESTINATION");
+						}
+					}
 
 					if (extracted_fields.find(L"SHIPPING LINE") != extracted_fields.end()) {
 						if (extracted_fields.find(L"CARRIER") == extracted_fields.end() ||
 							(extracted_fields.find(L"CARRIER") != extracted_fields.end() &&
-							extracted_fields.at(L"CARRIER")[0] == extracted_fields.at(L"SHIPPING LINE")[0])) {
+								get_levenstein_distance(to_wstring(std::get<1>(extracted_fields.at(L"CARRIER"))[0]), to_wstring(std::get<1>(extracted_fields.at(L"SHIPPING LINE"))[0])) < 3)) {
 							extracted_fields.emplace(std::make_pair(L"CARRIER", extracted_fields.at(L"SHIPPING LINE")));
 							extracted_fields.erase(L"SHIPPING LINE");
 						}
 					}
 
+					if (extracted_fields.find(L"CARRIER") != extracted_fields.end() &&
+						extracted_fields.find(L"SHIPPING LINE") != extracted_fields.end() &&
+						get_levenstein_distance(to_wstring(std::get<1>(extracted_fields.at(L"CARRIER"))[0]), to_wstring(std::get<1>(extracted_fields.at(L"SHIPPING LINE"))[0]), true) < 3) {
+						extracted_fields.erase(L"SHIPPING LINE");
+					}
+
+					if (extracted_fields.find(L"AGENT") != extracted_fields.end()) {
+						if (extracted_fields.find(L"CARRIER") != extracted_fields.end()) {
+							if (get_levenstein_distance(to_wstring(std::get<1>(extracted_fields.at(L"CARRIER"))[0]), to_wstring(std::get<1>(extracted_fields.at(L"AGENT"))[0]), true) < 3) {
+								std::get<1>(extracted_fields.at(L"AGENT")).erase(std::begin(std::get<1>(extracted_fields.at(L"AGENT"))));
+								std::get<1>(extracted_fields.at(L"AGENT_CC")).erase(std::begin(std::get<1>(extracted_fields.at(L"AGENT_CC"))));
+							}
+
+							if (std::get<1>(extracted_fields.at(L"AGENT")).size() == 2) {
+								if (get_levenstein_distance(to_wstring(std::get<1>(extracted_fields.at(L"CARRIER"))[0]), to_wstring(std::get<1>(extracted_fields.at(L"AGENT"))[1]), true) < 3) {
+									std::get<1>(extracted_fields.at(L"AGENT")).erase(std::begin(std::get<1>(extracted_fields.at(L"AGENT"))) + 1);
+									std::get<1>(extracted_fields.at(L"AGENT_CC")).erase(std::begin(std::get<1>(extracted_fields.at(L"AGENT_CC"))) + 1);
+								}
+							}
+							if (std::get<1>(extracted_fields.at(L"AGENT")).empty()) {
+								extracted_fields.erase(L"AGENT");
+							}
+						}
+					}
+
+
 					std::vector<std::wstring> insurance_company_fields{ L"INSURANCE COMPANY", L"INSURANCE SETTLING AGENT", L"INSURANCE SURVEY AGENT" };
 					std::vector<bool> insurance_companies(insurance_company_fields.size(), true);
+
 					for (auto i = 0; i < insurance_company_fields.size(); i++) {
 						for (auto j = i + 1; j < insurance_company_fields.size(); j++) {
 							if (!insurance_companies[j] ||
@@ -12046,8 +16647,8 @@ namespace selvy {
 								extracted_fields.find(insurance_company_fields[j]) == extracted_fields.end())
 								continue;
 
-							const auto cleaned_i = boost::regex_replace(extracted_fields.at(insurance_company_fields[i])[0], boost::wregex(L"[^a-zA-Z0-9&-]"), L"");
-							const auto cleaned_j = boost::regex_replace(extracted_fields.at(insurance_company_fields[j])[0], boost::wregex(L"[^a-zA-Z0-9&-]"), L"");
+							const auto cleaned_i = boost::regex_replace(to_wstring(std::get<1>(extracted_fields.at(insurance_company_fields[i]))[0]), boost::wregex(L"[^a-zA-Z0-9&-]"), L"");
+							const auto cleaned_j = boost::regex_replace(to_wstring(std::get<1>(extracted_fields.at(insurance_company_fields[j]))[0]), boost::wregex(L"[^a-zA-Z0-9&-]"), L"");
 							const auto threshold = std::max(1, std::min(3, static_cast<int>(std::min(cleaned_i.size(), cleaned_j.size()) / 2.5)));
 							if (SymSpell::DamerauLevenshteinDistance(cleaned_i, cleaned_j) < threshold)
 								insurance_companies[j] = false;
@@ -12065,27 +16666,53 @@ namespace selvy {
 					fill_others(L"INSURANCE SURVEY AGENT");
 					fill_others(L"MANUFACTURER");
 
-					std::unordered_map<std::wstring, std::vector<std::wstring>> extracted_cc_fields;
+					if (extracted_fields.find(L"VESSEL NAME") == extracted_fields.end()) {
+						if (extracted_fields.find(L"PRECARRIAGE BY") != extracted_fields.end()) {
+							extracted_fields.emplace(std::make_pair(L"VESSEL NAME", extracted_fields.at(L"PRECARRIAGE BY")));
+							extracted_fields.erase(L"PRECARRIAGE BY");
+						}
+					}
+					else {
+						fill_others(L"PRECARRIAGE BY");
+					}
+
+
+					if (extracted_fields.find(L"FINAL DESTINATION") != extracted_fields.end() && !std::get<1>(extracted_fields.at(L"FINAL DESTINATION")).empty())
+						fill_others2(L"FINAL DESTINATION", std::get<0>(extracted_fields.at(L"FINAL DESTINATION")), std::get<1>(extracted_fields.at(L"FINAL DESTINATION"))[0]);
+
+					/*for (const auto& other : others_fields) {
+					const auto field = std::get<0>(other);
+					const auto file_name = std::get<0>(std::get<1>(other));
+					const auto values = std::get<1>(std::get<1>(other));
+
+					for (const auto& value : values) {
+					fill_others2(field, file_name, value);
+					}
+					}*/
+
+
 					const auto fill_country_code = [&extracted_fields, &extracted_cc_fields, &configuration](const std::wstring& field) {
-						if (extracted_fields.find(field) != extracted_fields.end()) {
-							for (auto i = extracted_fields.at(field).size() - 1; i > 0; i--) {
-								const auto last_line = extracted_fields.at(field)[i];
-								const auto country = preprocess_country(std::make_pair(cv::Rect(), last_line), configuration, L"countries");
+						const auto cc_field = fmt::format(L"{}_CC", field);
+						if (extracted_fields.find(field) != extracted_fields.end() && extracted_fields.find(cc_field) == extracted_fields.end()) {
+							for (auto i = std::get<1>(extracted_fields.at(field)).size() - 1; i > 0; i--) {
+								const auto last_line = std::get<1>(extracted_fields.at(field))[i];
+								const auto country = preprocess_country(last_line, configuration, L"countries");
 								const auto country_str = boost::algorithm::trim_copy(to_wstring(country));
 
 								if (!country_str.empty()) {
 									const auto country_code = create_postprocess_function(configuration, L"country-countrycode.csv")(country_str);
 									if (!country_code.empty()) {
-										extracted_cc_fields.emplace(std::make_pair(fmt::format(L"{}_CC", field), std::vector<std::wstring>{country_code}));
+										extracted_cc_fields.emplace(std::make_pair(cc_field, std::make_pair(L"", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), country_code)})));
 										break;
 									}
 								}
 							}
-
 						}
 					};
 
-					std::set<std::wstring> country_code_ignore_fields{ L"VESSEL NAME", L"ORIGIN", L"SHIPPING LINE", L"GOODS DESCRIPTION", L" PORT OF LOADING", L"PORT OF DISCHARGE", L"PORT OF DELIVERY", L"AGENT", L"CARRIER" };
+					std::set<std::wstring> country_code_ignore_fields{
+						L"VESSEL NAME", L"ORIGIN", L"SHIPPING LINE", L"GOODS DESCRIPTION",
+						L"PORT OF LOADING", L"PORT OF DISCHARGE", L"PORT OF DELIVERY", L"FINAL DESTINATION", L"AGENT", L"AGENT_CC", L"CARRIER", L"SELLER", L"EXPORTER" };
 
 					for (const auto& field : extracted_fields) {
 						const auto field_name = std::get<0>(field);
@@ -12096,10 +16723,10 @@ namespace selvy {
 
 					if (extracted_fields.find(L"PLACE OF ISSUE") != extracted_fields.end()) {
 						std::set<std::wstring> country_code_bl_fields{
-							L"CARRIER", L"AGENT", L"SHIPPING LINE"
+							L"CARRIER", L"SHIPPING LINE"
 						};
 
-						const auto country_code = create_postprocess_function(configuration, L"country-countrycode.csv")(extracted_fields.at(L"PLACE OF ISSUE")[0]);
+						const auto country_code = create_postprocess_function(configuration, L"country-countrycode.csv")(to_wstring(std::get<1>(extracted_fields.at(L"PLACE OF ISSUE"))[0]));
 
 						for (const auto& field : extracted_fields) {
 							const auto field_name = std::get<0>(field);
@@ -12108,60 +16735,151 @@ namespace selvy {
 							if (country_code_bl_fields.find(field_name) != country_code_bl_fields.end()) {
 								if (extracted_cc_fields.find(field_cc_name) == extracted_cc_fields.end()) {
 
-									std::vector<std::wstring> field_ccs;
+									std::vector<std::pair<cv::Rect, std::wstring>> field_ccs;
 
-									for (auto i = 0; i < extracted_fields.at(field_name).size(); i++) {
-										field_ccs.emplace_back(country_code);
+									for (auto i = 0; i < std::get<1>(extracted_fields.at(field_name)).size(); i++) {
+										field_ccs.emplace_back(std::make_pair(cv::Rect(), country_code));
 									}
 
-									extracted_cc_fields.emplace(std::make_pair(field_cc_name, field_ccs));
+									extracted_cc_fields.emplace(std::make_pair(field_cc_name, std::make_pair(L"", field_ccs)));
 								}
 							}
 						}
 					}
 
 					if (extracted_fields.find(L"AGENT") != extracted_fields.end()
-						&& extracted_fields.at(L"AGENT").size() > 1)
-						fill_others(L"AGENT");
+						&& std::get<1>(extracted_fields.at(L"AGENT")).size() > 1) {
+						int size = std::min(3, static_cast<int>(std::get<1>(extracted_fields.at(L"AGENT")).size() - 1));
+						for (int i = 0; i < size; i++)
+							fill_others(L"AGENT");
+					}
 
-					std::set<std::wstring> country_code_bank_fields{
-						L"ISSUING BANK", L"COLLECTING BANK",
+
+					std::set<std::wstring> bank_fields{
+						L"COVERING BANK", L"ISSUING BANK", L"COLLECTING BANK", L"REIMBURSING BANK",
 					};
 
-					for (const auto& field : extracted_fields) {
+					for (auto& field : extracted_fields) {
 						const auto field_name = std::get<0>(field);
-						const auto field_cc_name = field_name + L"_BIC_CC";
+						auto& field_value = std::get<1>(std::get<1>(field));
 
-						if (country_code_bank_fields.find(field_name) != country_code_bank_fields.end() && extracted_fields.find(field_cc_name) == extracted_fields.end()) {
-							if (extracted_fields.at(field_name)[0].size() > 5) {
-								const auto swift_code = boost::to_lower_copy(extracted_fields.at(field_name)[0].substr(4, 2));
-								const auto country_code = create_postprocess_function(configuration, L"alpha2-countrycode.csv")(swift_code);
-								extracted_cc_fields.emplace(std::make_pair(field_cc_name, std::vector<std::wstring>{country_code}));
+						if (bank_fields.find(field_name) != bank_fields.end()) {
+							if (is_swift_code(field_value.back()) && !is_swift_code(field_value.front())) {
+								auto swift = field_value.back();
+								field_value.resize(field_value.size() - 1);
+								field_value.insert(field_value.begin(), swift);
 							}
 						}
 					}
 
+					std::vector<std::wstring> bank_orders{ L"COVERING BANK", L"ISSUING BANK", L"COLLECTING BANK", L"REIMBURSING BANK", };
+
+					bool is_export_type = false;
+
+					if (!is_export_type) {
+						for (const auto& order : bank_orders) {
+							if (extracted_fields.find(order) != extracted_fields.end()) {
+								const auto field_name = order;
+								const auto& field_value = std::get<1>(extracted_fields.at(order));
+								const auto& file_name = std::get<0>(extracted_fields.at(order));
+
+								if (is_swift_code(field_value[0])) {
+									extracted_fields.emplace(std::make_pair(L"AIC BANK", std::make_pair(file_name, field_value)));
+									const auto swift_code = boost::to_lower_copy(std::get<1>(field_value[0]).substr(4, 2));
+									const auto country_code = create_postprocess_function(configuration, L"alpha2-countrycode.csv")(swift_code);
+									extracted_cc_fields.emplace(std::make_pair(L"AIC BANK_BIC_CC", std::make_pair(L"", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), country_code)})));
+									fill_country_code(L"AIC BANK");
+									extracted_fields.erase(field_name);
+									break;
+								}
+							}
+						}
+					}
+
+					std::set<std::wstring> country_code_bank_fields{
+						L"COVERING BANK", L"ISSUING BANK", L"COLLECTING BANK", L"REIMBURSING BANK",
+					};
+					std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>> temp_extracted_fields;
+					temp_extracted_fields.insert(std::begin(extracted_fields), std::end(extracted_fields));
+
+					for (const auto& field : temp_extracted_fields) {
+						const auto field_name = std::get<0>(field);
+						const auto& field_value = std::get<1>(extracted_fields.at(field_name));
+						const auto& file_name = std::get<0>(extracted_fields.at(field_name));
+
+						if (country_code_bank_fields.find(field_name) != country_code_bank_fields.end()) {
+							if (is_swift_code(field_value[0])) {
+								const auto swift_code = boost::to_lower_copy(std::get<1>(field_value[0]));
+								const auto country_code = create_postprocess_function(configuration, L"alpha2-countrycode.csv")(boost::to_lower_copy(std::get<1>(field_value[0]).substr(4, 2)));
+
+								std::pair<cv::Rect, std::wstring> bank_name;
+								if (field_value.size() > 2)
+									bank_name = field_value[1];
+								else
+									bank_name = std::make_pair(cv::Rect(), create_postprocess_function(configuration, L"swift-bank.csv")(swift_code));
+
+								fill_others3(field_name, file_name, bank_name, country_code);
+							}
+							else {
+								fill_others(field_name);
+							}
+						}
+					}
 
 					extracted_fields.insert(std::begin(extracted_cc_fields), std::end(extracted_cc_fields));
+
+					if (extracted_fields.find(L"SELLER") != std::end(extracted_fields))
+						extracted_fields.erase(L"SELLER");
+
+					if (extracted_fields.find(L"EXPORTER") != std::end(extracted_fields))
+						extracted_fields.erase(L"EXPORTER");
+
+					if (extracted_fields.find(L"DRAWER") != extracted_fields.end()) {
+						extracted_fields.erase(L"DRAWER");
+					}
+
+					if (extracted_fields.find(L"BUYER") != extracted_fields.end()) {
+						extracted_fields.erase(L"BUYER");
+					}
+					if (extracted_fields.find(L"DRAWEE") != extracted_fields.end()) {
+						extracted_fields.erase(L"DRAWEE");
+					}
+					if (extracted_fields.find(L"IMPORTER") != extracted_fields.end()) {
+						extracted_fields.erase(L"IMPORTER");
+					}
+
+					for (auto& field : extracted_fields) {
+						auto& field_value = std::get<1>(std::get<1>(field));
+
+						for (auto& value : field_value) {
+							auto& str = std::get<1>(value);
+							boost::remove_erase_if(str, [](wchar_t ch) {
+								return ch > 0x7E || ch < 0x20;
+							});
+
+							str = boost::regex_replace(str, boost::wregex(L"^[[:punct:]]+", boost::regex_constants::icase), L"");
+
+							boost::replace_all(str, L"|", L"I");
+							boost::trim(str);
+						}
+					}
 				}
 
-				return extracted_fields;
-
+				return std::make_pair(document_categories, extracted_fields);
 			}
 
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
 				recognize(const boost::filesystem::path& path,
-				const std::wstring& class_name) override
+					const std::wstring& class_name) override
 			{
 				const auto configuration = load_configuration(L"trade");
-				//bool is_batch_mode = false;// std::stoi(configuration.at(L"engine").at(L"batchmode"));
-				bool is_batch_mode = std::stoi(configuration.at(L"engine").at(L"batchmode"));
-
-				std::unordered_map<std::wstring, std::vector<std::unordered_map<std::wstring, std::vector<std::wstring>>>> fields;
+				bool is_batch_mode = false;// std::stoi(configuration.at(L"engine").at(L"batchmode"));
+				std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>> fields;
 
 				std::mutex locks;
-				const auto fill_field = [&locks](std::unordered_map<std::wstring, std::vector<std::wstring>>& fields, const std::wstring& field,
-					const std::vector<std::wstring>& value) {
+
+				const auto fill_field = [&locks](std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>& fields, const std::wstring& field,
+					const std::vector<std::pair<cv::Rect, std::wstring>>& value) {
 					locks.lock();
 					if (!value.empty())
 						fields.emplace(std::make_pair(field, value));
@@ -12182,7 +16900,8 @@ namespace selvy {
 					}
 
 					std::sort(std::begin(files), std::end(files), compareNat);
-				} else {
+				}
+				else {
 					const auto extension = boost::algorithm::to_lower_copy(path.extension().native());
 
 					if (extension != L".png" && extension != L".jpg" && extension != L".tif" && extension != L".jp2")
@@ -12193,324 +16912,577 @@ namespace selvy {
 
 				try {
 					//cv::parallel_for_(cv::Range(0, files.size()), [&](const cv::Range& range) {
-						CComPtr<FREngine::IEngineLoader> loader;
-						FREngine::IEnginePtr engine;
+					CComPtr<FREngine::IEngineLoader> loader;
+					FREngine::IEnginePtr engine;
 #if __USE_ENGINE__
-						std::tie(loader, engine) = get_engine_object(configuration);
+					std::tie(loader, engine) = get_engine_object(configuration, false);
 #endif
-						//FREngine::IClassificationEnginePtr classification_engine;
-						//FREngine::IModelPtr classification_model;
+					//FREngine::IClassificationEnginePtr classification_engine;
+					//FREngine::IModelPtr classification_model;
 
-						//if (!is_batch_mode) {
-						//	classification_engine = engine->CreateClassificationEngine();
-						//	classification_model = classification_engine->
-						//		CreateModelFromFile(get_classification_model(configuration).c_str());
-						//}
+					//if (!is_batch_mode) {
+					//	classification_engine = engine->CreateClassificationEngine();
+					//	classification_model = classification_engine->
+					//		CreateModelFromFile(get_classification_model(configuration).c_str());
+					//}
 
-						for (auto i = 0; i < files.size(); i++) {
-							memory_reader memory_reader(boost::filesystem::absolute(files[i]), "");
+					for (auto i = 0; i < files.size(); i++) {
+						memory_reader memory_reader(boost::filesystem::absolute(files[i]), "");
 
-							if (!is_batch_mode && is_document_filtered(memory_reader.decrypted_)) {
-								continue;
-							}
-
-
-							const bool need_serialization = needSerialization(configuration, class_name, files[i]);
-
-							FREngine::IFRDocumentPtr document;
-							FREngine::IPagePreprocessingParamsPtr page_preprocessing_params;
-
-							std::wstring category;
-							double confidence = 0.;
-
-							auto file_name = boost::filesystem::path(files[i]).filename().native();
-#if __USE_ENGINE__
-							if (!is_batch_mode && need_serialization) {
-								document = engine->CreateFRDocument();
-								document->AddImageFileFromStream(&memory_reader, nullptr, nullptr, nullptr,
-									boost::filesystem::path(files[i]).filename().native().c_str());
-								if (document->Pages->Count < 1) {
-									document->Close();
-									continue;
-								}
-								page_preprocessing_params = engine->CreatePagePreprocessingParams();
-								page_preprocessing_params->CorrectOrientation = VARIANT_TRUE;
-								page_preprocessing_params->OrientationDetectionParams->put_OrientationDetectionMode(FREngine::OrientationDetectionModeEnum::ODM_Thorough);
-								document->Preprocess(page_preprocessing_params, nullptr, nullptr, nullptr);
-							}
-
-#endif
-							/*if (is_batch_mode) {
-								class_name = boost::filesystem::path(files[i]).parent_path().filename().native();
-								}
-								else {
-								class_name = classify_document(engine, configuration, classification_engine, classification_model, files[i], document);
-								}*/
-
-							if (!is_batch_mode && class_name.empty()) {
-								if (need_serialization) {
-#if __USE_ENGINE__
-									document->Close();
-#endif
-								}
-								continue;
-							}
-
-							const std::set<std::wstring> processed_class_names{
-								//L"AIR WAYBILL",
-								//L"BILL OF EXCHANGE",
-								L"BILL OF LADING",
-								//L"CERTIFICATE",
-								//L"CERTIFICATE OF ORIGIN",
-								L"COMMERCIAL INVOICE",
-								L"LETTER OF CREDIT",
-								L"PROFORMA INVOICE",
-								//L"PACKING LIST",
-								//L"INSURANCE POLICY",
-								//L"SHIPMENT ADVICE",
-								//L"REMITTANCE LETTER",
-								//L"LETTER OF GUARANTEE",
-								//L"FIRM OFFER",
-								//L"EXPORT PERMIT",
-								//L"CARGO RECEIPT",
-							};
-
-							if (processed_class_names.find(class_name) == processed_class_names.end()) {
-								if (need_serialization) {
-#if __USE_ENGINE__
-									document->Close();
-#endif
-								}
-								continue;
-							}
-
-							std::vector<block> blocks;
-							cv::Size image_size;
-							std::tie(blocks, std::ignore, image_size) = recognize_document(engine, configuration, class_name, files[i], document, true, true, false, true);
-
-							if (image_size.area() == 0)
-								image_size = estimate_paper_size(blocks);
-
-							if (!is_batch_mode) {
-								if (need_serialization) {
-#if __USE_ENGINE__
-									document->Close();
-#endif
-								}
-							}
-
-							if (blocks.empty())
-								continue;
-
-							const auto text = to_wstring(blocks);
-
-#ifdef WRITE_TRADE_TXT
-							const auto full_output_directory = fmt::format(WRITE_FILE_DIR);
-							if (!boost::filesystem::exists(full_output_directory))
-								boost::filesystem::create_directories(full_output_directory);
-							auto cur = time(NULL);
-							auto time = localtime(&cur);
-							auto out_file_path = fmt::format(L"{}\\result_{:02d}{:02d}.txt", full_output_directory, time->tm_mon + 1, time->tm_mday);
-							auto temp_file_name = boost::filesystem::path(files[i]).filename().native();
-							std::wofstream txt_file;
-							txt_file.imbue(std::locale(std::locale::empty(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::generate_header>));
-							txt_file.open(out_file_path, std::wofstream::out | std::wofstream::app);
-							txt_file << temp_file_name << std::endl << std::endl << std::endl;
-							txt_file << text << std::endl << std::endl << std::endl;
-							txt_file.close();
-#endif
-#if defined(_DEBUG)
-							const auto image = debug_;
-#endif
-							cv::TickMeter processing_ticks;
-							processing_ticks.start();
-							const auto keywords = get_keywords(configuration, keywords_, class_name);
-							const auto searched_fields = search_fields(class_name, keywords, blocks);
-
-							std::unordered_map<std::wstring, std::vector<std::wstring>> extracted_fields;
-
-							if (class_name == L"BILL OF LADING") {
-								const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
-								const auto carrier = extract_carrier(configuration, class_name, searched_fields, blocks, image_size);
-								const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
-								const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
-								//const auto port_of_discharge = extract_port_name(configuration, class_name, L"PORT OF DISCHARGE", searched_fields, blocks);
-								const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
-								const auto shipment_date = extract_shipment_date(configuration, class_name, searched_fields, blocks, image_size);
-								const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
-
-								fill_field(extracted_fields, L"CONSIGNEE", consignee);
-								fill_field(extracted_fields, L"CARRIER", std::vector<std::wstring>{carrier});
-								fill_field(extracted_fields, L"NOTIFY", notify);
-								fill_field(extracted_fields, L"PORT OF DISCHARGE", port_of_discharge);
-								//fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
-								fill_field(extracted_fields, L"PORT OF LOADING", port_of_loading);
-								fill_field(extracted_fields, L"SHIPMENT DATE", shipment_date);
-								//fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
-								fill_field(extracted_fields, L"VESSEL NAME", vessel_name);
-								
-							} else if (class_name == L"LETTER OF CREDIT") {
-								const auto swift_mt_sender = extract_swift_mt_sender(configuration, class_name, searched_fields, blocks, image_size);
-								const auto credit_number = extract_credit_number(configuration, class_name, searched_fields, blocks, image_size);
-								const auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size);
-								fill_field(extracted_fields, L"SWIFT MT SENDER", swift_mt_sender);
-								fill_field(extracted_fields, L"CREDIT NUMBER", credit_number);
-								fill_field(extracted_fields, L"AMOUNT", std::vector<std::wstring>{amount});
-								
-							} else if (class_name == L"COMMERCIAL INVOICE") {
-								
-								const auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
-								const auto lc_number = extract_lc_number(configuration, class_name, searched_fields, blocks, image_size);
-								const auto currency_sign = extract_currency_sign(configuration, class_name, searched_fields, blocks, image_size);
-								const auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size);
-								std::wstring currency_amount = currency_sign + amount ;
-								fill_field(extracted_fields, L"SELLER", seller);								
-								fill_field(extracted_fields, L"L/C NO", std::vector<std::wstring>{lc_number});
-								fill_field(extracted_fields, L"AMOUNT", std::vector<std::wstring>{currency_amount});
-							} else if (class_name == L"PROFORMA INVOICE") {
-
-								const auto bank_name = extract_bank_name(configuration, class_name, searched_fields, blocks, image_size);
-								const auto swift_code = extract_swift_code(configuration, class_name, searched_fields, blocks, image_size);
-								fill_field(extracted_fields, L"BANK NAME", bank_name);
-								fill_field(extracted_fields, L"SWIFT CODE", std::vector<std::wstring>{swift_code});
-							}
-
-							fill_field(extracted_fields, L"FILE NAME", std::vector<std::wstring>{file_name});
-
-							processing_ticks.stop();
-							spdlog::get("recognizer")->info("process document : {} ({:.2f}mSec)", to_cp949(boost::filesystem::path(files[i]).filename().native()),
-								processing_ticks.getTimeMilli());
-
-							if (extracted_fields.empty())
-								continue;
-
-							if (fields.find(class_name) == fields.end())
-								fields.emplace(class_name, std::vector<std::unordered_map<std::wstring, std::vector<std::wstring>>>());
-
-							fields.at(class_name).emplace_back(extracted_fields);
+						if (!is_batch_mode && is_document_filtered(memory_reader.decrypted_)) {
+							continue;
 						}
 
-						release_engine_object(std::make_pair(loader, engine));
-						//}, std::stoi(configuration.at(L"engine").at(L"concurrency")));
 
+						const bool need_serialization = needSerialization(configuration, class_name, files[i]);
+
+						FREngine::IFRDocumentPtr document;
+						FREngine::IPagePreprocessingParamsPtr page_preprocessing_params;
+
+						std::wstring category;
+						double confidence = 0.;
+
+						auto file_name = boost::filesystem::path(files[i]).filename().native();
+#if __USE_ENGINE__
+						if (!is_batch_mode && need_serialization) {
+							document = engine->CreateFRDocument();
+							document->AddImageFileFromStream(&memory_reader, nullptr, nullptr, nullptr,
+								boost::filesystem::path(files[i]).filename().native().c_str());
+							if (document->Pages->Count < 1) {
+								document->Close();
+								continue;
+							}
+							page_preprocessing_params = engine->CreatePagePreprocessingParams();
+							page_preprocessing_params->CorrectOrientation = VARIANT_FALSE;
+							page_preprocessing_params->OrientationDetectionParams->put_OrientationDetectionMode(FREngine::OrientationDetectionModeEnum::ODM_Thorough);
+							document->Preprocess(page_preprocessing_params, nullptr, nullptr, nullptr);
+						}
+
+#endif
+						/*if (is_batch_mode) {
+						class_name = boost::filesystem::path(files[i]).parent_path().filename().native();
+						}
+						else {
+						class_name = classify_document(engine, configuration, classification_engine, classification_model, files[i], document);
+						}*/
+
+						if (!is_batch_mode && class_name.empty()) {
+							if (need_serialization) {
+#if __USE_ENGINE__
+								document->Close();
+#endif
+							}
+							continue;
+						}
+
+						const std::set<std::wstring> processed_class_names{
+							//L"AIR WAYBILL",
+							//L"BILL OF EXCHANGE",
+							L"BILL OF LADING",
+							//L"CERTIFICATE",
+							//L"CERTIFICATE OF ORIGIN",
+							L"COMMERCIAL INVOICE",
+							L"LETTER OF CREDIT",
+							//L"PACKING LIST",
+							//L"INSURANCE POLICY",
+							//L"SHIPMENT ADVICE",
+							//L"REMITTANCE LETTER",
+							//L"LETTER OF GUARANTEE",
+							//L"FIRM OFFER",
+							//L"EXPORT PERMIT",
+							//L"CARGO RECEIPT",
+						};
+
+						if (processed_class_names.find(class_name) == processed_class_names.end()) {
+							if (need_serialization) {
+#if __USE_ENGINE__
+								document->Close();
+#endif
+							}
+							continue;
+						}
+
+						std::vector<block> blocks;
+						cv::Size image_size;
+						std::tie(blocks, std::ignore, image_size) = recognize_document(engine, configuration, class_name, files[i], document, true, true, false, true);
+
+						if (image_size.area() == 0)
+							image_size = estimate_paper_size(blocks);
+
+						if (!is_batch_mode) {
+							if (need_serialization) {
+#if __USE_ENGINE__
+								document->Close();
+#endif
+							}
+						}
+
+						if (blocks.empty())
+							continue;
+
+						const auto text = to_wstring(blocks);
+
+#ifdef WRITE_TRADE_TXT
+						const auto full_output_directory = fmt::format(WRITE_FILE_DIR);
+						if (!boost::filesystem::exists(full_output_directory))
+							boost::filesystem::create_directories(full_output_directory);
+						auto cur = time(NULL);
+						auto time = localtime(&cur);
+						auto out_file_path = fmt::format(L"{}\\result_{:02d}{:02d}.txt", full_output_directory, time->tm_mon + 1, time->tm_mday);
+						auto temp_file_name = boost::filesystem::path(files[i]).filename().native();
+						std::wofstream txt_file;
+						txt_file.imbue(std::locale(std::locale::empty(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::generate_header>));
+						txt_file.open(out_file_path, std::wofstream::out | std::wofstream::app);
+						txt_file << temp_file_name << std::endl << std::endl << std::endl;
+						txt_file << text << std::endl << std::endl << std::endl;
+						txt_file.close();
+#endif
+#if defined(_DEBUG)
+						const auto image = debug_;
+#endif
+						cv::TickMeter processing_ticks;
+						processing_ticks.start();
+						const auto keywords = get_keywords(configuration, keywords_, class_name);
+						const auto searched_fields = search_fields(class_name, keywords, blocks);
+
+						std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>> extracted_fields;
+#if defined(__NO_MERGE_VER__)
+						//merge07
+						if (class_name == L"BILL OF LADING") {
+
+							const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
+							const auto place_of_issue = extract_place_of_issue(configuration, class_name, searched_fields, blocks, image_size);
+
+							const auto precarriage_by = extract_precarriage_by(configuration, class_name, searched_fields, blocks, image_size);
+							const auto agent = extract_agent(configuration, class_name, searched_fields, blocks, image_size);
+
+
+							const auto carrier = extract_carrier(configuration, searched_fields, blocks, image_size);
+
+							const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+
+
+
+							const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+							const auto place_of_receipt = extract_place_of_receipt(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+							const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
+							const auto final_destination = extract_final_destination(configuration, class_name, searched_fields, blocks, image_size);
+
+							const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
+							const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
+							const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
+
+							const auto shipping_line = extract_shipping_line(configuration, class_name, searched_fields, blocks, image_size);
+
+							const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+							fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+							fill_field(extracted_fields, L"PLACE OF RECEIPT", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_receipt});
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+							fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
+							fill_field(extracted_fields, L"FINAL DESTINATION", std::vector<std::pair<cv::Rect, std::wstring>>{final_destination});
+							fill_field(extracted_fields, L"CONSIGNEE", consignee);
+							fill_field(extracted_fields, L"SHIPPER", shipper);
+							fill_field(extracted_fields, L"NOTIFY", notify);
+							fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+							fill_field(extracted_fields, L"PRECARRIAGE BY", std::vector<std::pair<cv::Rect, std::wstring>>{precarriage_by});
+							fill_field(extracted_fields, L"SHIPPING LINE", std::vector<std::pair<cv::Rect, std::wstring>>{shipping_line});
+							fill_field(extracted_fields, L"CARRIER", std::vector<std::pair<cv::Rect, std::wstring>>{carrier});
+							fill_field(extracted_fields, L"PLACE OF ISSUE", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), place_of_issue)});
+							fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
+							fill_field(extracted_fields, L"AGENT", std::get<0>(agent));
+							fill_field(extracted_fields, L"AGENT_CC", std::get<1>(agent));
+
+						}
+						else if (class_name == L"CARGO RECEIPT") {
+							const auto agent = extract_agent(configuration, class_name, searched_fields, blocks, image_size);
+							const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
+							const auto place_of_issue = extract_place_of_issue(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+							const auto place_of_receipt = extract_place_of_receipt(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+							const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
+							const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
+							const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
+							const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
+							const auto shipping_line = extract_shipping_line(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+							fill_field(extracted_fields, L"PLACE OF RECEIPT", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_receipt});
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+							fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
+							fill_field(extracted_fields, L"CONSIGNEE", consignee);
+							fill_field(extracted_fields, L"SHIPPER", shipper);
+							fill_field(extracted_fields, L"NOTIFY", notify);
+							fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+							fill_field(extracted_fields, L"PLACE OF ISSUE", std::vector<std::pair<cv::Rect, std::wstring>>{ std::make_pair(cv::Rect(), place_of_issue)});
+							fill_field(extracted_fields, L"AGENT", std::get<0>(agent));
+							fill_field(extracted_fields, L"AGENT_CC", std::get<1>(agent));
+						}
+						else if (class_name == L"LETTER OF CREDIT") {
+							const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
+							const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+							const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
+							const auto beneficiary = extract_beneficiary(configuration, class_name, searched_fields, blocks, image_size);
+
+							const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+							const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"APPLICANT", applicant);
+							fill_field(extracted_fields, L"BENEFICIARY", beneficiary);
+							fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+							fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
+							fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+							for (const auto& bank : banks) {
+								fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
+							}
+						}
+						else if (class_name == L"COMMERCIAL INVOICE" || class_name == L"PACKING LIST") {
+							//tyler
+							auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
+							for (int i = 0; i < seller.size(); i++)
+							{
+								seller.at(i).second = postprocess_uppercase_for_ci(seller.at(i).second);
+								if (seller.at(i).second == L"")
+								{
+									seller.erase(seller.begin() + i, seller.end());
+								}
+							}
+
+							const auto lc_number = extract_lc_number(configuration, class_name, searched_fields, blocks, image_size, L"L/C NO");
+							auto currency_sign = extract_currency_sign(configuration, class_name, searched_fields, blocks, image_size, L"CURRENCY SIGN");
+							auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size, L"AMOUNT");
+							if (amount.empty())
+							{
+								amount = extract_amount_for_ci(configuration, class_name, searched_fields, blocks, image_size, L"AMOUNTTWO");
+							}
+							if (!amount.empty())
+							{
+								amount.at(0).second = trade_document_recognizer::postprocess_digit_for_ci(amount.at(0).second, configuration);
+								//amount.at(0).second = postprocess_digit(amount.at(0).second);
+							}
+							if (currency_sign.empty())
+							{
+								currency_sign = std::vector<std::pair<cv::Rect, std::wstring>>{ { cv::Rect(), L"USD" } };
+							}
+							/*const auto buyer = extract_buyer(configuration, class_name, searched_fields, blocks, image_size);
+							const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
+							const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
+							const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+							const auto exporter = extract_exporter(configuration, class_name, searched_fields, blocks, image_size);
+							const auto beneficiary = extract_beneficiary(configuration, class_name, searched_fields, blocks, image_size);
+							const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
+							const auto manufacturer = extract_manufacturer(configuration, class_name, searched_fields, blocks, image_size);
+							const auto importer = extract_importer(configuration, class_name, searched_fields, blocks, image_size);
+
+							const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+							const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
+							const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);*/
+
+							fill_field(extracted_fields, L"SELLER", seller);
+							fill_field(extracted_fields, L"L/C NO", lc_number);
+							fill_field(extracted_fields, L"CURRENCY SIGN", currency_sign);
+							fill_field(extracted_fields, L"AMOUNT", amount);
+							/*fill_field(extracted_fields, L"BUYER", buyer);
+							fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
+							fill_field(extracted_fields, L"CONSIGNEE", consignee);
+							fill_field(extracted_fields, L"NOTIFY", notify);
+							fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+							fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
+							fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+							fill_field(extracted_fields, L"EXPORTER", exporter);
+							fill_field(extracted_fields, L"APPLICANT", applicant);
+							fill_field(extracted_fields, L"BENEFICIARY", beneficiary);
+							fill_field(extracted_fields, L"MANUFACTURER", manufacturer);
+							fill_field(extracted_fields, L"IMPORTER", importer);
+							fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});*/
+						}
+						else if (class_name == L"BILL OF EXCHANGE") {
+							/*const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
+
+							for (const auto& bank : banks) {
+							fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
+							}*/
+						}
+						else if (class_name == L"EXPORT PERMIT") {
+							const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+							fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+						}
+						else if (class_name == L"CERTIFICATE OF ORIGIN") {
+							const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
+							const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
+							const auto importer = extract_importer(configuration, class_name, searched_fields, blocks, image_size);
+							const auto exporter = extract_exporter(configuration, class_name, searched_fields, blocks, image_size);
+							const auto manufacturer = extract_manufacturer(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
+							fill_field(extracted_fields, L"IMPORTER", importer);
+							fill_field(extracted_fields, L"EXPORTER", exporter);
+							fill_field(extracted_fields, L"CONSIGNEE", consignee);
+							if (!manufacturer.empty()) {
+								if (exporter.empty())
+									fill_field(extracted_fields, L"MANUFACTURER", manufacturer);
+								else {
+									auto manu = std::get<1>(manufacturer[0]);
+									boost::remove_erase_if(manu, boost::is_any_of(L" .,"));
+									auto ex = std::get<1>(exporter[0]);
+									boost::remove_erase_if(ex, boost::is_any_of(L" .,"));
+
+									if (SymSpell::DamerauLevenshteinDistance(manu, ex) > 2) {
+										fill_field(extracted_fields, L"MANUFACTURER", manufacturer);
+									}
+								}
+							}
+						}
+						else if (class_name == L"INSURANCE POLICY") {
+							const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+							const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+
+							const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
+							const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
+
+							const auto insurance_company = extract_insurance_company(configuration, blocks, image_size);
+							const auto insurance_settling_agent = extract_insurance_company(configuration, searched_fields, blocks, image_size, L"INSURANCE SETTLING AGENT");
+							const auto insurance_survey_agent = extract_insurance_company(configuration, searched_fields, blocks, image_size, L"INSURANCE SURVEY AGENT");
+
+							fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::pair<cv::Rect, std::wstring>>{insurance_company});
+							fill_field(extracted_fields, L"INSURANCE SETTLING AGENT", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(std::get<0>(insurance_settling_agent), std::get<1>(insurance_settling_agent))});
+							fill_field(extracted_fields, L"INSURANCE SETTLING AGENT_CC", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), std::get<2>(insurance_settling_agent))});
+							fill_field(extracted_fields, L"INSURANCE SURVEY AGENT", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(std::get<0>(insurance_survey_agent), std::get<1>(insurance_survey_agent))});
+							fill_field(extracted_fields, L"INSURANCE SURVEY AGENT_CC", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), std::get<2>(insurance_survey_agent))});
+							fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+							fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+							fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
+							fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+						}
+						else if (class_name == L"SHIPMENT ADVICE") {
+							const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
+							const auto beneficiary = extract_beneficiary(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+							const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
+							const auto shipping_line = extract_shipping_line(configuration, class_name, searched_fields, blocks, image_size);
+							const auto insurance_company = extract_insurance_company(configuration, searched_fields, blocks, image_size, L"INSURANCE COMPANY");
+							const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"APPLICANT", applicant);
+							fill_field(extracted_fields, L"BENEFICIARY", beneficiary);
+							fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+							fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+							fill_field(extracted_fields, L"SHIPPING LINE", std::vector<std::pair<cv::Rect, std::wstring>>{shipping_line});
+							fill_field(extracted_fields, L"INSURANCE COMPANY", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(std::get<0>(insurance_company), std::get<1>(insurance_company))});
+							fill_field(extracted_fields, L"INSURANCE COMPANY_CC", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), std::get<2>(insurance_company))});
+
+							for (const auto& bank : banks) {
+								fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
+							}
+						}
+						else if (class_name == L"CERTIFICATE") {
+							const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+							const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+							const auto place_of_delivery = extract_place_of_delivery(configuration, class_name, searched_fields, blocks, image_size);
+							const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+							fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
+							fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+							fill_field(extracted_fields, L"PLACE OF DELIVERY", std::vector<std::pair<cv::Rect, std::wstring>>{place_of_delivery});
+							fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+						}
+						else if (class_name == L"AIR WAYBILL") {
+							const auto carrier = extract_airwaybill_carrier(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+							const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
+							const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
+							const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
+							const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
+							const auto agent = extract_agent(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"PORT OF LOADING", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_loading});
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::pair<cv::Rect, std::wstring>>{port_of_discharge});
+							fill_field(extracted_fields, L"CONSIGNEE", consignee);
+							fill_field(extracted_fields, L"SHIPPER", shipper);
+							fill_field(extracted_fields, L"NOTIFY", notify);
+							fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::pair<cv::Rect, std::wstring>>{vessel_name});
+							fill_field(extracted_fields, L"AGENT", std::get<0>(agent));
+							fill_field(extracted_fields, L"AGENT_CC", std::get<1>(agent));
+							fill_field(extracted_fields, L"CARRIER", std::vector<std::pair<cv::Rect, std::wstring>>{carrier});
+						}
+						else if (class_name == L"REMITTANCE LETTER") {
+							const auto covering_bank = extract_swift_bank(configuration, blocks, image_size);
+							//const auto issuing_bank = extract_issuing_bank(configuration, class_name, searched_fields, blocks, image_size);
+							const auto drawer = extract_drawer(configuration, class_name, searched_fields, blocks, image_size);
+							const auto drawee = extract_drawee(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"COVERING BANK", covering_bank);
+							//fill_field(extracted_fields, L"ISSUING BANK", issuing_bank);
+							fill_field(extracted_fields, L"DRAWER", drawer);
+							fill_field(extracted_fields, L"DRAWEE", drawee);
+						}
+						else if (class_name == L"FIRM OFFER") {
+							const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+							const auto origin = extract_origin(configuration, class_name, searched_fields, blocks, image_size);
+							const auto applicant = extract_applicant(configuration, class_name, searched_fields, blocks, image_size);
+							const auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
+							const auto buyer = extract_buyer(configuration, class_name, searched_fields, blocks, image_size);
+							const auto banks = extract_banks(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"SELLER", seller);
+							fill_field(extracted_fields, L"BUYER", buyer);
+							fill_field(extracted_fields, L"ORIGIN", std::vector<std::pair<cv::Rect, std::wstring>>{origin});
+							fill_field(extracted_fields, L"APPLICANT", applicant);
+							for (const auto& bank : banks) {
+								fill_field(extracted_fields, std::get<0>(bank), std::get<1>(bank));
+							}
+							fill_field(extracted_fields, L"GOODS DESCRIPTION", std::vector<std::pair<cv::Rect, std::wstring>>{goods});
+						}
+						else if (class_name == L"LETTER OF GUARANTEE") {
+							const auto port_of_loading = extract_port_of_loading(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_discharge = extract_port_of_discharge(configuration, class_name, searched_fields, blocks, image_size);
+							const auto consignee = extract_consignee(configuration, class_name, searched_fields, blocks, image_size);
+							const auto shipper = extract_shipper(configuration, class_name, searched_fields, blocks, image_size);
+							const auto notify = extract_notify(configuration, class_name, searched_fields, blocks, image_size);
+							const auto vessel_name = extract_vessel_name(configuration, class_name, searched_fields, blocks, image_size);
+							const auto goods = extract_goods_description(configuration, class_name, searched_fields, blocks, image_size);
+							const auto shipping_company = extract_shipping_company(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"PORT OF LOADING", { port_of_loading });
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", { port_of_discharge });
+							fill_field(extracted_fields, L"CONSIGNEE", consignee);
+							fill_field(extracted_fields, L"SHIPPER", shipper);
+							fill_field(extracted_fields, L"NOTIFY", notify);
+							fill_field(extracted_fields, L"VESSEL NAME", { vessel_name });
+							fill_field(extracted_fields, L"GOODS DESCRIPTION", { goods });
+							fill_field(extracted_fields, L"CARRIER", shipping_company);
+						}
+#endif
+#if defined(__MERGE_VER__)
+						if (class_name == L"BILL OF LADING") {
+							const auto consignee = extract_consignee_2(configuration, class_name, searched_fields, blocks, image_size);
+							//const auto carrier = extract_carrier_2(configuration, class_name, searched_fields, blocks, image_size);
+							const auto carrier = extract_carrier(configuration, searched_fields, blocks, image_size);
+							const auto notify = extract_notify_2(configuration, class_name, searched_fields, blocks, image_size);
+							const auto port_of_discharge = extract_port_of_discharge_2(configuration, class_name, searched_fields, blocks, image_size);
+							//const auto port_of_discharge = extract_port_name(configuration, class_name, L"PORT OF DISCHARGE", searched_fields, blocks);
+							const auto port_of_loading = extract_port_of_loading_2(configuration, class_name, searched_fields, blocks, image_size);
+							const auto shipment_date = extract_shipment_date_2(configuration, class_name, searched_fields, blocks, image_size);
+							const auto vessel_name = extract_vessel_name_2(configuration, class_name, searched_fields, blocks, image_size);
+
+							fill_field(extracted_fields, L"CONSIGNEE", consignee);
+							fill_field(extracted_fields, L"CARRIER/MASTER/OWNER", { carrier });
+							fill_field(extracted_fields, L"NOTIFY", notify);
+							fill_field(extracted_fields, L"PORT OF DISCHARGE", port_of_discharge);
+							//fill_field(extracted_fields, L"PORT OF DISCHARGE", std::vector<std::wstring>{port_of_discharge});
+							fill_field(extracted_fields, L"PORT OF LOADING", port_of_loading);
+							fill_field(extracted_fields, L"ON BOARD DATE", shipment_date);
+							fill_field(extracted_fields, L"VESSEL NAME", vessel_name );
+							//fill_field(extracted_fields, L"ON BOARD DATE", std::vector<std::wstring>{shipment_date});
+							//fill_field(extracted_fields, L"VESSEL NAME", std::vector<std::wstring>{vessel_name});
+							//fill_field(extracted_fields, L"VESSEL NAME", { vessel_name });
+
+						}
+						else if (class_name == L"LETTER OF CREDIT") {
+							const auto swift_mt_sender = extract_swift_mt_sender(configuration, class_name, searched_fields, blocks, image_size);
+							const auto credit_number = extract_credit_number(configuration, class_name, searched_fields, blocks, image_size);
+							const auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size, L"AMOUNT");
+							fill_field(extracted_fields, L"SWIFT MT SENDER", swift_mt_sender);
+							fill_field(extracted_fields, L"CREDIT NUMBER", credit_number);
+							fill_field(extracted_fields, L"AMOUNT", amount);
+
+						}
+						/*else if (class_name == L"COMMERCIAL INVOICE") {
+
+						const auto seller = extract_seller(configuration, class_name, searched_fields, blocks, image_size);
+						const auto lc_number = extract_lc_number(configuration, class_name, searched_fields, blocks, image_size);
+						const auto currency_sign = extract_currency_sign(configuration, class_name, searched_fields, blocks, image_size);
+						const auto amount = extract_amount(configuration, class_name, searched_fields, blocks, image_size);
+						std::wstring currency_amount = currency_sign + amount;
+						fill_field(extracted_fields, L"SELLER", seller);
+						fill_field(extracted_fields, L"L/C NO", std::vector<std::wstring>{lc_number});
+						fill_field(extracted_fields, L"AMOUNT", std::vector<std::wstring>{currency_amount});
+						}*/
+						else if (class_name == L"PROFORMA INVOICE") {
+
+							/*const auto bank_name = extract_bank_name(configuration, class_name, searched_fields, blocks, image_size);
+							const auto swift_code = extract_swift_code(configuration, class_name, searched_fields, blocks, image_size);
+							fill_field(extracted_fields, L"BANK NAME", bank_name);
+							fill_field(extracted_fields, L"SWIFT CODE", swift_code);*/
+						}
+#endif
+						fill_field(extracted_fields, L"FILE NAME", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(cv::Rect(), file_name)});
+
+						processing_ticks.stop();
+						spdlog::get("recognizer")->info("process document : {} ({:.2f}mSec)", to_cp949(boost::filesystem::path(files[i]).filename().native()),
+							processing_ticks.getTimeMilli());
+
+						if (extracted_fields.empty())
+							continue;
+
+						fields.emplace(class_name, extracted_fields);
+					}
+
+					release_engine_object(std::make_pair(loader, engine), false);
+					//}, std::stoi(configuration.at(L"engine").at(L"concurrency")));
 				}
 				catch (_com_error& e) {
 					spdlog::get("recognizer")->error("exception : {} ({} : {})", to_cp949(e.Description().GetBSTR()), __FILE__, __LINE__);
 				}
 
-				if (!is_batch_mode) {
-					std::vector<std::wstring> categories = {
-						L"AIR WAYBILL",              //0
-						L"BILL OF EXCHANGE",         //1
-						L"BILL OF EXCHANGE-KOR",     //2
-						L"BILL OF LADING",           //3
-						L"CARGO RECEIPT",            //4
-						L"CERTIFICATE",              //5
-						L"CERTIFICATE OF ORIGIN",    //6
-						L"EXPORT PERMIT",            //7
-						L"INSURANCE POLICY",         //8
-						L"LETTER OF CREDIT",         //9
-						L"PACKING LIST",             //10
-						L"REMITTANCE LETTER",        //11
-						L"SHIPMENT ADVICE",          //12
-						L"WAYBILL",                  //13
-						L"COMMERCIAL INVOICE",       //14
-						L"LETTER OF GUARANTEE",      //15
-						L"FIRM OFFER",               //16
-						L"PROFORMA INVOICE",               //17
-					};
-
-					std::unordered_map<std::wstring, std::vector<std::wstring>> key_values = {
-						{ categories[0],{ L"PORT OF LOADING", L"PORT OF DISCHARGE", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"AGENT" } },
-						{ categories[1],{ L"NEGOTIATION BANK" } },
-						{ categories[2],{ L"" } },
-						{ categories[3],{ L"CONSIGNEE", L"CARRIER", L"NOTIFY", L"PORT OF DISCHARGE", L"PORT OF LOADING", L"SHIPMENT DATE", L"VESSEL NAME"} },
-						//{ categories[3],{ L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"CARRIER", L"PLACE OF ISSUE", L"ORIGIN", L"SHIPPING LINE" } },
-						{ categories[4],{ L"PORT OF LOADING", L"PLACE OF RECEIPT", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"CONSIGNEE", L"SHIPPER", L"NOTIFY", L"VESSEL NAME", L"PLACE OF ISSUE" } },
-						{ categories[5],{ L"ORIGIN", L"GOODS DESCRIPTION", L"PORT OF LOADING", L"PLACE OF DELIVERY", L"PORT OF DISCHARGE", L"VESSEL NAME", } },
-						{ categories[6],{ L"ORIGIN", L"IMPORTER" } },
-						{ categories[7],{ L"GOODS DESCRIPTION" } },
-						{ categories[8],{ L"INSURANCE COMPANY", L"INSURANCE SETTLING AGENT", L"INSURANCE SURVEY AGENT", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"ORIGIN", L"GOODS DESCRIPTION" } },
-						//{ categories[9],{ L"ISSUING BANK", L"COLLECTING BANK", L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE" } },
-						{ categories[9],{ L"SWIFT MT SENDER", L"AMOUNT", L"CREDIT NUMBER" } },
-						{ categories[10],{ L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERTY", L"VESSEL NAME" } },
-						{ categories[11],{ L"ISSUING BANK", L"DRAWER" } },
-						{ categories[12],{ L"APPLICANT", L"BENEFICIARY", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"SHIPPING LINE", L"INSURANCE COMPANY" } },
-						{ categories[13],{ L"", } },
-						//{ categories[14], { L"SELLER", L"BUYER", L"ORIGIN", L"CONSIGNEE", L"NOTIFY", L"PORT OF LOADING", L"EXPORTER", L"APPLICANT", L"MANUFACTURER", L"PORT OF DISCHARGE", L"PLACE OF DELIVERY", L"VESSEL NAME" } },
-						{ categories[14],{ L"SELLER", L"L/C NO", L"AMOUNT" } },
-						//{ categories[14],{ L"SELLER", L"L/C NO", L"CURRENCY SIGN", L"AMOUNT" } },
-						{ categories[15],{ L"CARRIER", L"SHOPPER", L"PORT OF LOADING", L"PORT OF DISCHARGE", L"VESSEL NAME", L"CONSIGNEE", L"GOODS DESCRIPTION", L"NOTIFY" } },
-						{ categories[16],{ L"SELLER", L"BUYER", L"ORIGIN", L"APPLICANT", L"COLLECTING BANK" } },
-						{ categories[17],{ L"BANK NAME", L"SWIFT CODE" } },
-					};
-
-					auto cur = time(NULL);
-					auto time = localtime(&cur);
-					auto output_path = fmt::format(L"{}\\result_{:02d}{:02d}.txt", path.parent_path().native(), time->tm_mon + 1, time->tm_mday);
-					auto set_name = path.filename().native();
-					std::wstring result_text;
-
-					for (auto& category : categories) {
-						if (fields.find(category) == fields.end()) {
-							continue;
-						}
-						auto& category_results = fields.at(category);
-
-						auto& keys = key_values.at(category);
-						int count = 1;
-						for (auto& result : category_results) {
-							result_text += fmt::format(L"\"set name\",\"{}\"\n", set_name);
-							result_text += fmt::format(L"\"file name\",\"{}\"\n", result.at(L"FILE NAME").front());
-							result_text += fmt::format(L"\"category\",\"{}\"\n", category);
-							result_text += fmt::format(L"\"category number\",\"{}\"\n", count);
-							count++;
-							for (auto& key : keys) {
-								auto& name = key;
-								result_text += L"\"" + name + L"\",";
-								if (result.find(name) == result.end()) {
-									result_text += L"\n";
-									continue;
-								}
-								auto& r = result.at(name);
-
-								for (auto& f : r) {
-									result_text += L"\"" + f + L"\",";
-								}
-								result_text += L"\n";
-							}
-							result_text += L"\n";
-						}
-					}
-					std::wofstream txt_file;
-					txt_file.imbue(std::locale(std::locale::locale::empty(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::generate_header>));
-					txt_file.open(output_path, std::wofstream::out | std::wofstream::app);
-					txt_file << result_text << std::endl;
-					txt_file.close();
-
-				}
-
+				//std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>> extracted_fields;
 				std::unordered_map<std::wstring, std::vector<std::wstring>> extracted_fields;
 
+				//std::unordered_map<std::wstring, std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>> fields;
+
 				if (fields.find(class_name) != fields.end()) {
-					extracted_fields = fields.at(class_name).front();
+					auto& result = fields.at(class_name);
+					for (auto& f : result) {
+						std::wstring name = std::get<0>(f);
+						std::vector<std::wstring> values;
+						for (auto& v : std::get<1>(f)) {
+							values.emplace_back(std::get<1>(v));
+						}
+						extracted_fields.emplace(name, values);
+					}
+					//extracted_fields = fields.at(class_name);
 				}
 				return extracted_fields;
 			}
 
 		private:
-			static std::wstring
+			static std::pair<cv::Rect, std::wstring>
 				extract_port_name(const configuration& configuration, const std::wstring& category, const std::wstring& field_name,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks)
 			{
 				if (fields.find(field_name) == fields.end())
-					return L"";
+					return std::make_pair(cv::Rect(), L"");
 
 				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> filtered_fields;
 				std::copy_if(std::begin(fields.at(field_name)), std::end(fields.at(field_name)), std::back_inserter(filtered_fields), [](const std::tuple<cv::Rect, std::wstring, cv::Range>& field) {
 					const auto text = std::get<1>(field);
+					if (boost::regex_search(text, boost::wregex(L"^from:bangl", boost::regex::icase)))
+						return false;
+					if (boost::regex_search(text, boost::wregex(L"FROM DATE OF", boost::regex::icase)))
+						return false;
+					if (boost::regex_search(text, boost::wregex(L"DAYS FROM", boost::regex::icase)))
+						return false;
 					if (boost::regex_search(text, boost::wregex(L"^to|^from", boost::regex::icase)))
+						return true;
+					if (boost::regex_search(text, boost::wregex(L"thence to:", boost::regex::icase)))
 						return true;
 					if (boost::regex_search(text, boost::wregex(L"\\s+to:", boost::regex::icase)))
 						return false;
@@ -12519,7 +17491,7 @@ namespace selvy {
 
 				std::vector<std::pair<cv::Rect, std::wstring>> port_name;
 
-				if (category == L"BILL OF LADING") {
+				if (category == L"LETTER OF CREDIT" || category == L"INSURANCE POLICY" || category == L"CERTIFICATE") {
 					port_name = extract_field_values(filtered_fields, blocks,
 						search_self,
 						std::bind(&trade_document_recognizer::preprocess_port_name,
@@ -12530,10 +17502,29 @@ namespace selvy {
 
 					if (port_name.empty()) {
 						port_name = extract_field_values(filtered_fields, blocks,
-							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 100, false, false, false),
-							std::bind(&trade_document_recognizer::preprocess_port_name,
+							search_self,
+							std::bind(&trade_document_recognizer::preprocess_country_port_name,
 								std::placeholders::_1,
-								configuration, L"countries"),
+								configuration, L"countries", false),
+							create_extract_function(L"(?:ANY (.*) PORT|ANY PORT IN (.*))"),
+							create_postprocess_function(configuration, L"country-countrycode2.csv"));
+					}
+
+					if (port_name.empty()) {
+						port_name = extract_field_values(filtered_fields, blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							std::bind(&trade_document_recognizer::preprocess_country_port_name,
+								std::placeholders::_1,
+								configuration, L"countries", true),
+							default_extract,
+							create_postprocess_function(configuration, L"country-countrycode2.csv"));
+					}
+
+					if (port_name.empty()) {
+						port_name = extract_field_values(filtered_fields, blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							std::bind(&trade_document_recognizer::preprocess_port_name,
+								std::placeholders::_1, configuration, L"countries"),
 							create_extract_function(configuration, L"ports", 2),
 							postprocess_uppercase);
 					}
@@ -12541,20 +17532,51 @@ namespace selvy {
 					if (port_name.empty()) {
 						port_name = extract_field_values(filtered_fields, blocks,
 							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							std::bind(&trade_document_recognizer::preprocess_port_name,
+							std::bind(&trade_document_recognizer::preprocess_country_port_name,
 								std::placeholders::_1,
-								configuration, L"countries"),
-							create_extract_function(configuration, L"ports", 2),
-							postprocess_uppercase);
+								configuration, L"countries", false),
+							create_extract_function(L"(?:ANY (.*) PORT|ANY PORT IN (.*))"),
+							create_postprocess_function(configuration, L"country-countrycode2.csv"));
 					}
-					
+
+					if (port_name.empty()) {
+						if (category == L"INSURANCE POLICY") {
+							port_name = extract_field_values(filtered_fields, blocks,
+								std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+								std::bind(&trade_document_recognizer::preprocess_country_port_name,
+									std::placeholders::_1,
+									configuration, L"countries", true),
+								default_extract,
+								create_postprocess_function(configuration, L"country-countrycode2.csv"));
+
+							if (port_name.empty()) {
+								port_name = extract_field_values(filtered_fields, blocks,
+									std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2.5, false, false, false),
+									std::bind(&trade_document_recognizer::preprocess_port_name,
+										std::placeholders::_1,
+										configuration, L"countries"),
+									create_extract_function(configuration, L"ports", 2),
+									postprocess_uppercase);
+							}
+
+							if (port_name.empty()) {
+								port_name = extract_field_values(filtered_fields, blocks,
+									std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+									std::bind(&trade_document_recognizer::preprocess_country_port_name,
+										std::placeholders::_1,
+										configuration, L"countries", false),
+									create_extract_function(L"(?:ANY (.*) PORT|ANY PORT IN (.*))"),
+									create_postprocess_function(configuration, L"country-countrycode2.csv"));
+							}
+						}
+					}
 				}
-				else {
+				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST" || category == L"SHIPMENT ADVICE") {
 					port_name = extract_field_values(filtered_fields, blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+						search_self,
 						std::bind(&trade_document_recognizer::preprocess_port_name,
-						std::placeholders::_1,
-						configuration, L"countries"),
+							std::placeholders::_1,
+							configuration, L"countries"),
 						create_extract_function(configuration, L"ports", 2),
 						postprocess_uppercase);
 
@@ -12562,32 +17584,89 @@ namespace selvy {
 						port_name = extract_field_values(filtered_fields, blocks,
 							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 							std::bind(&trade_document_recognizer::preprocess_port_name,
+								std::placeholders::_1,
+								configuration, L"countries"),
+							create_extract_function(configuration, L"ports", 2),
+							postprocess_uppercase);
+					}
+
+					if (port_name.empty()) {
+						port_name = extract_field_values(filtered_fields, blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 100, false, false, false),
+							std::bind(&trade_document_recognizer::preprocess_port_name,
+								std::placeholders::_1,
+								configuration, L"countries"),
+							create_extract_function(configuration, L"ports", 2),
+							postprocess_uppercase);
+					}
+				}
+				else if (category == L"BILL OF LADING" || category == L"CARGO RECEIPT") {
+					port_name = extract_field_values(filtered_fields, blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 100, false, false, false),
+						std::bind(&trade_document_recognizer::preprocess_port_name,
 							std::placeholders::_1,
 							configuration, L"countries"),
+						create_extract_function(configuration, L"ports", 2),
+						postprocess_uppercase);
+				}
+				else if (category == L"AIR WAYBILL") {
+					port_name = extract_field_values(filtered_fields, blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+						std::bind(&trade_document_recognizer::preprocess_port_name,
+							std::placeholders::_1,
+							configuration, L"countries"),
+						create_extract_function(configuration, L"ports", 2),
+						postprocess_uppercase);
+				}
+				else if (category == L"LETTER OF GUARANTEE") {
+					port_name = extract_field_values(filtered_fields, blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 1.0, 100, true),
+						std::bind(&trade_document_recognizer::preprocess_port_name,
+							std::placeholders::_1,
+							configuration, L"countries"),
+						create_extract_function(configuration, L"ports", 2),
+						postprocess_uppercase);
+				}
+				else {
+					port_name = extract_field_values(filtered_fields, blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+						std::bind(&trade_document_recognizer::preprocess_port_name,
+							std::placeholders::_1,
+							configuration, L"countries"),
+						create_extract_function(configuration, L"ports", 2),
+						postprocess_uppercase);
+
+					if (port_name.empty()) {
+						port_name = extract_field_values(filtered_fields, blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							std::bind(&trade_document_recognizer::preprocess_port_name,
+								std::placeholders::_1,
+								configuration, L"countries"),
 							create_extract_function(configuration, L"ports", 2),
 							postprocess_uppercase);
 					}
 				}
 
 				if (port_name.empty())
-					return L"";
+					return std::make_pair(cv::Rect(), L"");
 
 				const auto extracted_port_name = boost::to_upper_copy(std::get<1>(port_name[0]));
 				auto country_code = create_postprocess_function(configuration, L"port-countrycode.csv")(extracted_port_name);
+
 				if (country_code.empty())
 					country_code = create_postprocess_function(configuration, L"country-countrycode.csv")(extracted_port_name);
 
-				//return fmt::format(L"{},{}", extracted_port_name, country_code);
-				return fmt::format(L"{}", extracted_port_name);
+				//return std::make_pair(std::get<0>(port_name[0]), fmt::format(L"{},{}", extracted_port_name, country_code));
+				return std::make_pair(std::get<0>(port_name[0]), fmt::format(L"{}", extracted_port_name));
 			}
 
-			static std::wstring
+			static std::pair<cv::Rect, std::wstring>
 				extract_airport_name(const configuration& configuration, const std::wstring& category, const std::wstring& field_name,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks)
 			{
 				if (fields.find(field_name) == fields.end())
-					return L"";
+					return std::make_pair(cv::Rect(), L"");
 
 				std::vector<std::pair<cv::Rect, std::wstring>> port_name;
 
@@ -12595,29 +17674,40 @@ namespace selvy {
 					port_name = extract_field_values(fields.at(field_name), blocks,
 						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
 						std::bind(&trade_document_recognizer::preprocess_airport_name,
-						std::placeholders::_1,
-						configuration, L"countries"),
+							std::placeholders::_1,
+							configuration, L"countries"),
 						create_extract_function(configuration, L"airports", 2),
 						postprocess_uppercase);
 				}
 
 				if (port_name.empty())
-					return L"";
+					return std::make_pair(cv::Rect(), L"");
 
 				const auto extracted_port_name = std::get<1>(port_name[0]);
 				const auto country_code = create_postprocess_function(configuration, L"airport-countrycode.csv")(extracted_port_name);
-				return fmt::format(L"{},{}", extracted_port_name, country_code);
+				return std::make_pair(std::get<0>(port_name[0]), fmt::format(L"{},{}", extracted_port_name, country_code));
 			}
 
-			static std::vector<std::wstring>
+			static std::pair<cv::Rect, std::wstring>
 				extract_port_of_loading(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (category == L"AIR WAYBILL")
+					return extract_airport_name(configuration, category, L"PORT OF LOADING", fields, blocks);
+				return extract_port_name(configuration, category, L"PORT OF LOADING", fields, blocks);
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_port_of_loading_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 
 				const std::wstring FIELD_NAME = L"PORT OF LOADING";
-				
+
 				std::vector<std::wstring> extracted_result;
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
 
@@ -12635,25 +17725,37 @@ namespace selvy {
 						postprocess_uppercase);
 				}
 
-				
+
 
 				if (result.empty()) {
-					extracted_result.emplace_back(L"");
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 				}
-				else{
-					extracted_result.emplace_back(to_wstring(result[0]));
+				else {
+					result.erase(result.begin() + 1, result.end());
 				}
 
-				return extracted_result;
+				for (auto i = 0; i < result.size(); i++) {
+					auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(result.at(i).second));
+					if (str.find(L"DOCUMENT") != std::wstring::npos ||
+						str.find(L"RECEIPT") != std::wstring::npos ||
+						str.find(L"PLACE") != std::wstring::npos ||
+						str.find(L"THERE") != std::wstring::npos ||
+						str.find(L"SURRENDERED") != std::wstring::npos) {
+						result.resize(i);
+						break;
+					}
+				}
+
+				return result;
 
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_shipment_date(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				std::vector<std::wstring> extracted_result;
 
@@ -12674,7 +17776,7 @@ namespace selvy {
 						//default_preprocess,
 						default_extract,
 						postprocess_uppercase);
-				
+
 				}
 
 				if (result.empty()) {
@@ -12686,31 +17788,81 @@ namespace selvy {
 				}
 
 
+				
+
+				return result;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_shipment_date_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				std::vector<std::pair<cv::Rect, std::wstring>> result;
+
+				result = extract_field_values(fields.at(L"ON BOARD DATE"), blocks,
+					std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+					preprocess_shipment_date,
+					//default_preprocess,
+					default_extract,
+					postprocess_uppercase);
+
+
 				if (result.empty()) {
-					extracted_result.emplace_back(L"");
-				}
-				else {
-					//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[0]));
-					//}
+					result = extract_field_values(fields.at(L"ON BOARD DATE"), blocks,
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 1.6, 100, true),
+						preprocess_shipment_date,
+						//default_preprocess,
+						default_extract,
+						postprocess_uppercase);
+
 				}
 
-				return extracted_result;
+				if (result.empty()) {
+					result = extract_field_values(fields.at(L"ON BOARD DATE"), blocks,
+						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						preprocess_shipment_date,
+						default_extract,
+						postprocess_uppercase);
+				}
+
+				if (result.empty()) {
+					result = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, blocks,
+						default_search,
+							preprocess_shipment_date,
+							create_extract_function(L"((JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[ .,/-]{1}[0-9]{2}[ .,/-]{1}[0-9]{4})| \
+								((JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[ .,/-]{1}[0-9]{2}[ .,/-]{1}[0-9]{4})| \
+								([0-9]{2}[ .,/-]{1}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[ .,/-]{1}[0-9]{2,4})| \
+								((JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[0-9]{2}[ .,/-]{1}[0-9]{4})|\
+								((JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[0-9]{6})|\
+								([0-9]{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[0-9]{4})|\
+								([0-9]{2}[ .,/-]{1}[0-9]{2}[ .,/-]{1}[0-9]{4})"),
+							default_postprocess);
+				}
+
+				if (!result.empty())
+				{
+					result.erase(result.begin() + 1, result.end());
+				}
+				
+				return result;
 			}
-			
-			// LC recognition
-			static std::vector<std::wstring>
-				extract_swift_mt_sender( const configuration& configuration, 
-										const std::wstring& category,
-										const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&	fields, 
-										const std::vector<block>& blocks, 
-										const cv::Size& image_size)
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_swift_mt_sender(const configuration& configuration,
+					const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&	fields,
+					const std::vector<block>& blocks,
+					const cv::Size& image_size)
 			{
 				const std::wstring FIELD_NAME = L"SWIFT MT SENDER";
 				std::vector<std::wstring> extracted_result;
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
-				
-				
+
+
 				result = extract_field_values(fields.at(FIELD_NAME), blocks,
 					std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 1.6, 100, true), // 우측 여러 라인일때
 					preprocess_sender,
@@ -12734,38 +17886,56 @@ namespace selvy {
 				}
 
 
-				if (result.empty()) {
-					extracted_result.emplace_back(L"");
+				/*if (result.empty()) {
+				extracted_result.emplace_back(L"");
 				}
 				else {
-					for (auto& a : result) {
-						extracted_result.emplace_back(to_wstring(a));
-					}
-					for (auto i = 0; i < extracted_result.size(); i++) {
-						auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
-						if (str.find(L"BEHEFICIARY") != std::wstring::npos ||
-							str.find(L"BENEFICIARY") != std::wstring::npos ||
-							str.find(L"FIENEFICLART") != std::wstring::npos ||
-							str.find(L"U4222043350") != std::wstring::npos ||
-							str.find(L"S0032026304") != std::wstring::npos ||
-							str.find(L"SENDERS") != std::wstring::npos ||
-							str.find(L"BENEBWWT") != std::wstring::npos) {
-							extracted_result.resize(i);
-							break;
-						}
-					}
+				for (auto& a : result) {
+				extracted_result.emplace_back(to_wstring(a));
+				}
+				for (auto i = 0; i < extracted_result.size(); i++) {
+				auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(extracted_result[i]));
+				if (str.find(L"BEHEFICIARY") != std::wstring::npos ||
+				str.find(L"BENEFICIARY") != std::wstring::npos ||
+				str.find(L"FIENEFICLART") != std::wstring::npos ||
+				str.find(L"U4222043350") != std::wstring::npos ||
+				str.find(L"S0032026304") != std::wstring::npos ||
+				str.find(L"SENDERS") != std::wstring::npos ||
+				str.find(L"BENEBWWT") != std::wstring::npos) {
+				extracted_result.resize(i);
+				break;
+				}
+				}
 				}
 
 				return extracted_result;
+				*/
 
+
+				for (auto i = 0; i < result.size(); i++) {
+					auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(result.at(i).second));
+					if (str.find(L"BEHEFICIARY") != std::wstring::npos ||
+						str.find(L"BENEFICIARY") != std::wstring::npos ||
+						str.find(L"FIENEFICLART") != std::wstring::npos ||
+						str.find(L"U4222043350") != std::wstring::npos ||
+						str.find(L"S0032026304") != std::wstring::npos ||
+						str.find(L"SENDERS") != std::wstring::npos ||
+						str.find(L"BENEBWWT") != std::wstring::npos) {
+						result.resize(i);
+						break;
+					}
+				}
+
+
+				return result;
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_credit_number(const configuration& configuration,
-									const std::wstring& category,
-									const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&	fields,
-									const std::vector<block>& blocks,
-									const cv::Size& image_size)
+					const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&	fields,
+					const std::vector<block>& blocks,
+					const cv::Size& image_size)
 			{
 				const std::wstring FIELD_NAME = L"CREDIT NUMBER";
 
@@ -12803,118 +17973,55 @@ namespace selvy {
 					}
 				}
 
-				if (result.empty() || to_wstring(result[0]).length() > 50) {
-					return extracted_result;
+				//if (result.empty() || to_wstring(result[0]).length() > 50) {
+				//	return extracted_result;
+				//}
+				//else {
+				//	//for (auto& a : result) {
+				//	extracted_result.emplace_back(to_wstring(result[0]));
+				//	//}
+				//}
+				if (!result.empty())
+				{
+					if (result.at(0).second.length() > 50)
+					{
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
+					}
 				}
-				else {
-					//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[0]));
-					//}
-				}
-
-				return extracted_result;
+				return result;
 			}
 
-			static std::wstring
-				extract_amount(const configuration& configuration, const std::wstring& category,
-					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+			static std::pair<cv::Rect, std::wstring>
+				extract_place_of_receipt(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
 					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
-				const std::wstring FIELD_NAME = L"AMOUNT";
-				if (fields.find(FIELD_NAME) == fields.end())
-					return L"";
-
-				std::vector<std::pair<cv::Rect, std::wstring>> total;
-
-				if (category == L"COMMERCIAL INVOICE") {
-					total = extract_field_values2(fields.at(FIELD_NAME), blocks,
-						search_self,
-						preprocess_amount,
-						default_extract,
-						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));
-
-					if (total.empty())
-						total = extract_field_values2(fields.at(FIELD_NAME), blocks,
-							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 5.0, 8, false),
-							preprocess_amount,
-							default_extract,
-							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));
-				}
-				else if (category == L"LETTER OF CREDIT") {
-
-					total = extract_field_values(fields.at(FIELD_NAME), blocks,
-						search_self,
-						preprocess_amount,
-						default_extract,
-						default_postprocess);
-
-					if (total.empty() || to_wstring(total[0]).length() < 5) {
-						total = extract_field_values(fields.at(FIELD_NAME), blocks,
-							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							preprocess_amount,
-							default_extract,
-							default_postprocess);
-
-					}
-
-					if (total.empty() || to_wstring(total[0]).length() < 5) {
-						total = extract_field_values(fields.at(FIELD_NAME), blocks,
-							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
-							preprocess_amount,
-							default_extract,
-							default_postprocess);
-
-					}
-
-				}
-
-
-				if (total.empty())
-					return L"";
-
-				return std::get<1>(total[0]);
+				return extract_port_name(configuration, category, L"PLACE OF RECEIPT", fields, blocks);
 			}
 
-			static std::vector<std::wstring>
-				extract_place_of_receipt(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
-			{
-				std::vector<std::wstring> extracted_result;
-
-				std::vector<std::pair<cv::Rect, std::wstring>> result;
-
-				result = extract_field_values(fields.at(L"PLACE OF RECEIPT"), blocks,
-					std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-					default_preprocess,
-					default_extract,
-					postprocess_uppercase);
-
-				if (result.empty() || to_wstring(result[0]).length() > 50) {
-					return extracted_result;
-				}
-				else {
-					//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[0]));
-					//}
-				}
-
-				return extracted_result;
-			}
-
-
-			static std::vector<std::wstring>
+			static std::pair<cv::Rect, std::wstring>
 				extract_port_of_discharge(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (category == L"AIR WAYBILL")
+					return extract_airport_name(configuration, category, L"PORT OF DISCHARGE", fields, blocks);
+				return extract_port_name(configuration, category, L"PORT OF DISCHARGE", fields, blocks);
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_port_of_discharge_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				const std::wstring FIELD_NAME = L"PORT OF DISCHARGE";
 				std::vector<std::wstring> extracted_result;
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
-				
-				
+
+
 				result = extract_field_values(fields.at(FIELD_NAME), blocks,
 					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false), // 0.1, 1.6, 100, true)
 					preprocess_port_of_discharge,
@@ -12932,49 +18039,48 @@ namespace selvy {
 
 
 				if (result.empty()) {
-					extracted_result.emplace_back(L"");
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 				}
 				else {
-					extracted_result.emplace_back(to_wstring(result[0]));
+					result.erase(result.begin() + 1, result.end());
 				}
 
-				return extracted_result;
-				
+				for (auto i = 0; i < result.size(); i++) {
+					auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(result.at(i).second));
+					if (str.find(L"DOCUMENT") != std::wstring::npos ||
+						str.find(L"ASSIGNS") != std::wstring::npos ||
+						str.find(L"RECEIPT") != std::wstring::npos ||
+						str.find(L"DISCHARGE") != std::wstring::npos ||
+						str.find(L"ORIGINAL") != std::wstring::npos ||
+						str.find(L"DELIVERY") != std::wstring::npos) {
+						result.resize(i);
+						break;
+					}
+				}
+
+				return result;
+
 			}
 
-			static std::vector<std::wstring>
+			static std::pair<cv::Rect, std::wstring>
 				extract_place_of_delivery(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
-				std::vector<std::wstring> extracted_result;
-
-				std::vector<std::pair<cv::Rect, std::wstring>> result;
-
-				result = extract_field_values(fields.at(L"PLACE OF DELIVERY"), blocks,
-					//std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
-					std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-					default_preprocess,
-					default_extract,
-					postprocess_discharge);
-
-				if (result.empty() || to_wstring(result[0]).length() > 50) {
-					return extracted_result;
-				}
-				else {
-					//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[0]));
-					//}
-				}
-
-				return extracted_result;
-
+				return extract_port_name(configuration, category, L"PLACE OF DELIVERY", fields, blocks);
 			}
 
-
-			static std::vector<std::wstring>
+			static std::pair<cv::Rect, std::wstring>
+				extract_final_destination(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				return extract_port_name(configuration, category, L"FINAL DESTINATION", fields, blocks);
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_bank_name(const configuration& configuration,
 					const std::wstring& category,
 					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&	fields,
@@ -13017,20 +18123,20 @@ namespace selvy {
 					}
 				}
 
-				if (result.empty() || to_wstring(result[0]).length() > 50) {
-					return extracted_result;
-				}
-				else {
-					//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[0]));
-					//}
-				}
+				//if (result.empty() || to_wstring(result[0]).length() > 50) {
+				//	return extracted_result;
+				//}
+				//else {
+				//	//for (auto& a : result) {
+				//	extracted_result.emplace_back(to_wstring(result[0]));
+				//	//}
+				//}
 
-				return extracted_result;
+				return result;
 			}
 
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_swift_code(const configuration& configuration,
 					const std::wstring& category,
 					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&	fields,
@@ -13073,16 +18179,16 @@ namespace selvy {
 					}
 				}
 
-				if (result.empty() || to_wstring(result[0]).length() > 50) {
-					return extracted_result;
-				}
-				else {
-					//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[0]));
-					//}
-				}
+				//if (result.empty() || to_wstring(result[0]).length() > 50) {
+				//	return extracted_result;
+				//}
+				//else {
+				//	//for (auto& a : result) {
+				//	extracted_result.emplace_back(to_wstring(result[0]));
+				//	//}
+				//}
 
-				return extracted_result;
+				return result;
 			}
 
 			static bool
@@ -13134,135 +18240,17 @@ namespace selvy {
 				return false;
 			}
 
-			
-			static std::wstring
-				extract_lc_number(const configuration& configuration, const std::wstring& category,
-					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-					const std::vector<block>& blocks, const cv::Size& image_size)
-			{
-				if (fields.find(L"L/C NO") == fields.end())
-					return L"";
-
-				std::vector<std::pair<cv::Rect, std::wstring>> lc_number;
-
-				if (category == L"COMMERCIAL INVOICE") {
-					lc_number = extract_field_values(fields.at(L"L/C NO"), blocks,
-						search_self,
-						preprocess_lc_number,
-						default_extract,
-						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
-
-					if (lc_number.empty()) {
-						lc_number = extract_field_values(fields.at(L"L/C NO"), blocks,
-							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
-							preprocess_lc_number,
-							default_extract,
-							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
-						//std::bind(&selvy::ocr::trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
-					}
-					if (lc_number.empty())
-						lc_number = extract_field_values(fields.at(L"L/C NO"), blocks,
-							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 5.0, 8, false),
-							preprocess_lc_number,
-							default_extract,
-							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
-				}
-
-
-				if (lc_number.empty())
-					return L"";
-
-				return std::get<1>(lc_number[0]);
-			}
-
-			static std::wstring
-				extract_license_number(const configuration& configuration, const std::wstring& category,
-					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-					const std::vector<block>& blocks, const cv::Size& image_size, const std::wstring& search_field_name)
-			{
-				if (fields.find(search_field_name) == fields.end())
-					return L"";
-
-				std::vector<std::pair<cv::Rect, std::wstring>> found;
-				//categoty == ""
-				if (true) {
-					found = extract_field_values(fields.at(search_field_name), blocks,
-						search_self,
-						default_preprocess,
-						default_extract,
-						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_license_number, std::placeholders::_1, configuration));
-
-					if (found.empty()) {
-						found = extract_field_values(fields.at(search_field_name), blocks,
-							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							default_preprocess,
-							default_extract,
-							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_license_number, std::placeholders::_1, configuration));
-						//std::bind(&selvy::ocr::trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
-						//postprecess_license_number 수정필요
-					}
-
-				}
-
-
-				if (found.empty())
-					return L"";
-
-				return std::get<1>(found[0]);
-			}
-
-			//tyler
-			static std::wstring
-				extract_currency_sign(const configuration& configuration, const std::wstring& category,
-					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-					const std::vector<block>& blocks, const cv::Size& image_size)
-			{
-				if (fields.find(L"CURRENCY SIGN") == fields.end())
-					return L"";
-
-				std::vector<std::pair<cv::Rect, std::wstring>> currency_sign;
-
-				if (category == L"COMMERCIAL INVOICE") {
-					currency_sign = extract_field_values(fields.at(L"CURRENCY SIGN"), blocks,
-						search_self,
-						preprocess_currency_sign,
-						default_extract,
-						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_currency_sign, std::placeholders::_1, configuration));
-
-					if (currency_sign.empty())
-						currency_sign = extract_field_values(fields.at(L"CURRENCY SIGN"), blocks,
-							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							preprocess_currency_sign,
-							default_extract,
-							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_currency_sign, std::placeholders::_1, configuration));
-
-					if (currency_sign.empty())
-						currency_sign = extract_field_values(fields.at(L"CURRENCY SIGN"), blocks,
-							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-							preprocess_currency_sign,
-							default_extract,
-							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_currency_sign, std::placeholders::_1, configuration));
-				}
-
-
-				if (currency_sign.empty())
-					return L"";
-
-				return std::get<1>(currency_sign[0]);
-			}
-
-			
-			
-
 			static bool
 				find_address_country(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category, const int line_index)
 			{
 				auto text = std::get<1>(a);
-				text = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z\\.,]"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z\\., ]"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(\\s)\\s+"), L"$1");
 				text = boost::regex_replace(text, boost::wregex(L"\\s*([\\.,])\\s*"), L"$1");
 				text = boost::regex_replace(text, boost::wregex(L"\\s+(\\S)\\s+"), L"$1 ");
 				text = boost::regex_replace(text, boost::wregex(L"\\s+TO", boost::regex::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"KQREA", boost::regex::icase), L"KOREA");
+				text = boost::regex_replace(text, boost::wregex(L"LIBERAL", boost::regex::icase), L"");
 
 				std::vector<std::wstring> words;
 				boost::algorithm::split(words, text, boost::is_any_of(L" ."), boost::token_compress_on);
@@ -13311,16 +18299,161 @@ namespace selvy {
 				return false;
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_consignee(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"CONSIGNEE") == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> extracted_consignee;
+
+				std::vector<std::pair<cv::Rect, std::wstring>> consignee;
+
+				const auto paper = image_size;
+				std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> left_side_field;
+				for (auto& field : fields.at(L"CONSIGNEE")) {
+					auto rect = to_rect(field);
+					auto basis_range = std::get<2>(field);;
+					auto str = to_wstring(field, false, true);
+					if (basis_range.start > 5) {
+						continue;
+					}
+					if (boost::regex_search(str, boost::wregex(L"PO NO.", boost::regex::icase))) {
+						continue;
+					}
+					if (rect.x < paper.width / 4 && rect.y < paper.height / 2) {
+						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+						new_field.emplace_back(field);
+						left_side_field.insert(std::make_pair(L"CONSIGNEE", new_field));
+						break;
+					}
+				}
+
+				if (category == L"BILL OF LADING" || category == L"CARGO RECEIPT" || category == L"CERTIFICATE OF ORIGIN") {
+					if (left_side_field.find(L"CONSIGNEE") != left_side_field.end())
+						consignee = extract_field_values(left_side_field.at(L"CONSIGNEE"), blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
+							default_preprocess,
+							create_extract_function(L"(?:ORDER OF )(.*)"),
+							postprocess_uppercase);
+				}
+				else if (category == L"LETTER OF GUARANTEE") {
+					consignee = extract_field_values(fields.at(L"CONSIGNEE"), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 1.0, 10, true),
+						default_preprocess,
+						create_extract_function(L"(?:ORDER OF )(.*)"),
+						postprocess_uppercase);
+
+					if (!consignee.empty()) {
+						const auto same_blocks = find_nearest_down_lines(to_block(consignee[0]), blocks, 0.5, 0.0, 2, true);
+						std::transform(std::begin(same_blocks), std::end(same_blocks), std::back_inserter(consignee), [](const std::pair<cv::Rect, std::wstring>& line) {
+							return std::make_pair(std::get<0>(line), postprocess_uppercase(std::get<1>(line)));
+						});
+					}
+				}
+				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST") {
+					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> new_fields;
+					for (auto& field : fields.at(L"CONSIGNEE")) {
+						auto basis_range = std::get<2>(field);;
+						auto str = to_wstring(field, false, true);
+						if (basis_range.start > 5) {
+							continue;
+						}
+						if (boost::regex_search(str, boost::wregex(L"PO NO.", boost::regex::icase))) {
+							continue;
+						}
+						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+						new_field.emplace_back(field);
+						new_fields.insert(std::make_pair(L"CONSIGNEE", new_field));
+					}
+					if (new_fields.find(L"CONSIGNEE") != new_fields.end()) {
+						consignee = extract_field_values(new_fields.at(L"CONSIGNEE"), blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
+							default_preprocess,
+							create_extract_function(L"(?:ORDER OF )(.*)"),
+							postprocess_uppercase);
+
+						if (consignee.empty()) {
+							consignee = extract_field_values(new_fields.at(L"CONSIGNEE"), blocks,
+								search_self,
+								default_preprocess,
+								create_extract_function(L"(?:ORDER OF )(.*)"),
+								postprocess_uppercase);
+
+							if (consignee.empty()) {
+								consignee = extract_field_values(new_fields.at(L"CONSIGNEE"), blocks,
+									search_self,
+									std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+										configuration, L"companies"),
+									default_extract,
+									postprocess_uppercase);
+							}
+						}
+						if (consignee.empty()) {
+							consignee = extract_field_values(new_fields.at(L"CONSIGNEE"), blocks,
+								std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 1.0, 10, true),
+								std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+									configuration, L"companies"),
+								default_extract,
+								postprocess_uppercase);
+						}
+						if (consignee.empty())
+							return extract_company_and_address(configuration, category, L"CONSIGNEE", new_fields, blocks);
+					}
+				}
+				else {
+					consignee = extract_field_values(fields.at(L"CONSIGNEE"), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
+						default_preprocess,
+						create_extract_function(L"(?:ORDER OF )(.*)"),
+						postprocess_uppercase);
+				}
+
+				if (consignee.empty()) {
+					if (category == L"BILL OF LADING" || category == L"CARGO RECEIPT") {
+						extracted_consignee = extract_company_and_address(configuration, category, L"CONSIGNEE", left_side_field, blocks);
+						if (!extracted_consignee.empty() && extracted_consignee.size() > 5) {
+							for (auto i = 0; i < extracted_consignee.size(); i++) {
+								auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(std::get<1>(extracted_consignee[i])));
+								if (str.find(L"NOTIFY ") != std::wstring::npos) {
+									extracted_consignee.resize(i);
+									break;
+								}
+							}
+						}
+					}
+					else {
+						extracted_consignee = extract_company_and_address(configuration, category, L"CONSIGNEE", fields, blocks);
+					}
+				}
+				else {
+					auto consignee_string = to_wstring(consignee);
+					if (consignee_string == L"SHIPPER")
+						return extracted_consignee;
+					for (auto& a : consignee) {
+						extracted_consignee.emplace_back(a);
+					}
+				}
+
+				auto& str = to_wstring(extracted_consignee);
+				if (boost::regex_search(str, boost::wregex(L"^AT PLACE OF"))
+					|| boost::regex_search(str, boost::wregex(L"DAYS FREE"))) {
+					extracted_consignee.clear();
+				}
+
+				return extracted_consignee;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_consignee_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				const std::wstring FIELD_NAME = L"CONSIGNEE";
 				if (fields.find(FIELD_NAME) == fields.end())
-					return std::vector<std::wstring>();
-
-				std::vector<std::wstring> extracted_consignee;
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 				std::vector<std::pair<cv::Rect, std::wstring>> consignee;
 
@@ -13340,11 +18473,11 @@ namespace selvy {
 				if (category == L"BILL OF LADING") {
 					if (left_side_field.find(FIELD_NAME) != left_side_field.end())
 						consignee = extract_field_values(left_side_field.at(FIELD_NAME), blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
-						default_preprocess,
-						//create_extract_function(L"(?:ORDER OF )(.*)"),
-						default_extract,
-						postprocess_uppercase);
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
+							default_preprocess,
+							//create_extract_function(L"(?:ORDER OF )(.*)"),
+							default_extract,
+							postprocess_uppercase);
 				}
 				else if (category == L"COMMERCIAL INVOICE") {
 					consignee = extract_field_values(fields.at(FIELD_NAME), blocks,
@@ -13357,7 +18490,7 @@ namespace selvy {
 						consignee = extract_field_values(fields.at(FIELD_NAME), blocks,
 							search_self,
 							std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-							configuration, L"companies"),
+								configuration, L"companies"),
 							default_extract,
 							postprocess_uppercase);
 					}
@@ -13371,15 +18504,17 @@ namespace selvy {
 				}
 
 				if (consignee.empty()) {
-					extracted_consignee = extract_company_and_address(configuration, category, FIELD_NAME, fields, blocks);
+					consignee = extract_company_and_address(configuration, category, FIELD_NAME, fields, blocks);
 				}
 				else {
 					for (auto& a : consignee) {
 						auto value = to_wstring(a);
 						value = boost::regex_replace(value, boost::wregex(L"/ Y"), L"");
 						value = boost::regex_replace(value, boost::wregex(L"([tT]{1}EL)(.*)"), L"");
-						value = boost::regex_replace(value, boost::wregex(L"([tT]{1}[aA]{1}[xX]{1})(.*)"), L"");
-						value = boost::regex_replace(value, boost::wregex(L"([fF]{1}ax)(.*)"), L"");
+						value = boost::regex_replace(value, boost::wregex(L"(PHONE)(.*)"), L"");
+						value = boost::regex_replace(value, boost::wregex(L"(PH[:;]{1})(.*)"), L"");
+						//value = boost::regex_replace(value, boost::wregex(L"([tT]{1}[aA]{1}[xX]{1})(.*)"), L"");
+						value = boost::regex_replace(value, boost::wregex(L"(FAX[:;]{1})(.*)"), L"");
 						value = boost::regex_replace(value, boost::wregex(L"(ATTN)(.*)"), L"");
 						value = boost::regex_replace(value, boost::wregex(L"(NOTIFY PARTY)(.*)"), L"");
 						value = boost::regex_replace(value, boost::wregex(L"AHN"), L"ATTN");
@@ -13387,29 +18522,44 @@ namespace selvy {
 						value = boost::regex_replace(value, boost::wregex(L"KEKO"), L"NEKO");
 						value = boost::regex_replace(value, boost::wregex(L"BALK"), L"HALK");
 						value = boost::regex_replace(value, boost::wregex(L"PUBAU"), L"PUBALI");
+						value = boost::regex_replace(value, boost::wregex(L"0T0M0TIV"), L"OTOMOTIV");
 						value = boost::regex_replace(value, boost::wregex(L"MOHAKHAU QK"), L"MOHAKHALI C/A");
 						value = boost::regex_replace(value, boost::wregex(L"LID. MO"), L"LTD 1-10");
 						value = boost::regex_replace(value, boost::wregex(L"COMPANY UNITED"), L"COMPANY LIMITED");
 						value = boost::regex_replace(value, boost::wregex(L" I LAS C DRV7C ROZAS, MADRID, RDTN CHTKI"), L"LAS ROZAS MADRID");
-						extracted_consignee.emplace_back(value);
+						a.second = value;
 					}
 				}
 
-				return extracted_consignee;
+				return consignee;
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_shipper(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"SHIPPER") == fields.end())
-					return std::vector<std::wstring>();
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
 				if (fields.at(L"SHIPPER").size() > 0) {
 					const auto paper = image_size;
 					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> left_side_field;
 					for (auto& field : fields.at(L"SHIPPER")) {
 						auto rect = to_rect(field);
+						auto basis_range = std::get<2>(field);
+						auto str = to_wstring(field, false, true);
+						if (basis_range.start > 5) {
+							continue;
+						}
+						if (boost::regex_search(str, boost::wregex(L"LOAD", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"STOW", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"ACCOUNT", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"DECLARES", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"PRODUCT", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"SEAL", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"WEIGHT", boost::regex::icase))) {
+							continue;
+						}
 						if (rect.x < paper.width / 4 && rect.y < paper.height / 2) {
 							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
 							new_field.emplace_back(field);
@@ -13417,21 +18567,24 @@ namespace selvy {
 							break;
 						}
 					}
+
 					if (left_side_field.find(L"SHIPPER") == left_side_field.end())
-						return std::vector<std::wstring>();
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 					return extract_company_and_address(configuration, category, L"SHIPPER", left_side_field, blocks);
 				}
+
 				return extract_company_and_address(configuration, category, L"SHIPPER", fields, blocks);
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_shipping_company(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"CARRIER") == fields.end())
-					return std::vector < std::wstring>();
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
 				if (fields.at(L"CARRIER").size() > 0) {
 					const auto paper = image_size;
 					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> left_side_field;
@@ -13445,17 +18598,50 @@ namespace selvy {
 						}
 					}
 					if (left_side_field.find(L"CARRIER") == left_side_field.end())
-						return std::vector<std::wstring>();
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 					return extract_company_and_address(configuration, category, L"CARRIER", left_side_field, blocks);
 				}
+
 				return extract_company_and_address(configuration, category, L"CARRIER", fields, blocks);
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_notify(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"NOTIFY") == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				if (fields.at(L"NOTIFY").size() > 0) {
+					const auto paper = image_size;
+					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> up_side_field;
+					for (auto& field : fields.at(L"NOTIFY")) {
+						auto rect = to_rect(field);
+						auto basis_range = std::get<2>(field);
+						if (basis_range.start > 5) {
+							continue;
+						}
+						if (rect.y < paper.height * 2 / 5) {
+							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+							new_field.emplace_back(field);
+							up_side_field.insert(std::make_pair(L"NOTIFY", new_field));
+							break;
+						}
+					}
+					if (up_side_field.find(L"NOTIFY") == up_side_field.end())
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+					return extract_company_and_address(configuration, category, L"NOTIFY", up_side_field, blocks);
+				}
+				return extract_company_and_address(configuration, category, L"NOTIFY", fields, blocks);
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_notify_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				const std::wstring FIELD_NAME = L"NOTIFY";
 
@@ -13477,211 +18663,515 @@ namespace selvy {
 				}
 
 				if (left_side_field.find(FIELD_NAME) != left_side_field.end()) {
-					result = extract_field_values(left_side_field.at(FIELD_NAME), blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
+						result = extract_field_values(left_side_field.at(FIELD_NAME), blocks,
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, true),
 						preprocess_notify,
 						default_extract,
 						postprocess_uppercase);
+
+					if (result.empty()) {
+						result = extract_field_values(left_side_field.at(FIELD_NAME), blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 10, true, true, false),
+							preprocess_notify,
+							default_extract,
+							postprocess_uppercase);
+					}
 				}
-				
+
 
 
 				if (result.empty()) {
-					extracted_result = extract_company_and_address(configuration, category, FIELD_NAME, fields, blocks);
+					result = extract_company_and_address(configuration, category, FIELD_NAME, fields, blocks);
+				}
+				//else {
+				//	//for (auto& a : result) {
+				//	//	auto value = to_wstring(a);
+				//	//	value = boost::regex_replace(value, boost::wregex(L"(FOR)(.*)"), L"");
+				//	//	value = boost::regex_replace(value, boost::wregex(L"(TEL)(.*)"), L"");
+				//	//	extracted_result.emplace_back(value);
+				//	//}
+				//	for (auto& a : result) {
+				//		extracted_result.emplace_back(to_wstring(a));
+				//	}
+
+				//}
+
+				for (auto i = 0; i < result.size(); i++) {
+					auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(result.at(i).second));
+					if (str.find(L"FOR") != std::wstring::npos ||
+						str.find(L"PLACE") != std::wstring::npos ||
+						str.find(L"PRECARRIED") != std::wstring::npos ||
+						str.find(L"PRE-") != std::wstring::npos ||
+						str.find(L"PRC-") != std::wstring::npos ||
+						str.find(L"PTE-") != std::wstring::npos ||
+						str.find(L"PRO-") != std::wstring::npos ||
+						str.find(L"FAX") != std::wstring::npos ||
+						str.find(L"EMAIL") != std::wstring::npos ||
+						str.find(L"MOBILE") != std::wstring::npos ||
+						str.find(L"CARNAGE") != std::wstring::npos ||
+						str.find(L"CARRIAGE") != std::wstring::npos ||
+						str.find(L"OCEAN VESSEL") != std::wstring::npos ||
+						str.find(L"VOYAGE") != std::wstring::npos ||
+						str.find(L"REGISTERED") != std::wstring::npos ||
+						str.find(L"VESSEL") != std::wstring::npos ||
+						str.find(L"CONTAINER") != std::wstring::npos ||
+						str.find(L"PRE CARRIAGE") != std::wstring::npos ||
+						str.find(L"TEL") != std::wstring::npos ) {
+						result.resize(i);
+						break;
+					}
+				}
+				/*
+				
+				*/
+				return result;
+
+			}
+
+			static std::pair<std::vector<std::pair<cv::Rect, std::wstring>>, std::vector<std::pair<cv::Rect, std::wstring>>>
+				extract_agent(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				std::unordered_set<std::pair<cv::Rect, std::wstring>> agents;
+				std::vector<std::pair<cv::Rect, std::wstring>> agents_cc;
+
+				/*if (fields.find(L"AGENT") == fields.end())
+				return std::make_pair(std::vector<std::pair<cv::Rect, std::wstring>>(), std::vector<std::pair<cv::Rect, std::wstring>>());
+
+				if (category == L"AIR WAYBILL" || category == L"BILL OF LADING" || category == L"CARGO RECEIPT") {
+				std::vector<std::pair<cv::Rect, std::wstring>> company_and_addresses;
+
+				if (fields.at(L"AGENT").size() > 0) {
+				const auto paper = image_size;
+				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+				for (auto& field : fields.at(L"AGENT")) {
+				auto rect = to_rect(field);
+				auto str = to_wstring(field, false, true);
+				if (boost::regex_search(str, boost::wregex(L"IN WITNESS", boost::regex::icase)))
+				continue;
+				if (rect.y > paper.height * 3 / 4) {
+				new_field.emplace_back(field);
+				}
+				}
+
+				std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> down_side_field;
+				down_side_field.insert(std::make_pair(L"AGENT", new_field));
+
+				if (down_side_field.find(L"AGENT") != down_side_field.end()) {
+				auto agent = extract_field_values(down_side_field.at(L"AGENT"), blocks,
+				search_line,
+				default_preprocess,
+				create_extract_function(L"(?:[BD]Y )?(.*) [A*]S AGENTS?(?: [FT][AO]R)?"),
+				postprocess_uppercase);
+
+				if (!agent.empty()) {
+				agents.emplace(agent[0]);
+				} else {
+				const auto regex = L"AGENTS?(?: [FT][AO]R) ?";
+				boost::wregex re(regex, boost::regex_constants::icase);
+				boost::match_results<std::wstring::const_iterator> matches;
+
+				boost::wregex re2(L"AS AGENTS?", boost::regex_constants::icase);
+
+				for (auto i = 0; i < down_side_field.at(L"AGENT").size(); i++) {
+				const auto agent_field = down_side_field.at(L"AGENT")[i];
+
+				const auto text = std::get<1>(agent_field);
+				if (boost::regex_search(std::begin(text), std::end(text), matches, re)
+				|| boost::regex_search(std::begin(text), std::end(text), matches, re2)) {
+				const auto suspected_agents = find_up_lines(agent_field, blocks, 0.2, 7, 10, true);
+
+				if (suspected_agents.empty())
+				continue;
+
+				bool is_added = false;
+				for (auto j = 0; j < suspected_agents.size(); j++) {
+				if (j > 3)
+				break;
+				auto& line = suspected_agents[j];
+				const auto agent = preprocess_company(line, configuration, L"companies");
+				if (!std::get<1>(agent).empty()) {
+				agents.emplace(std::get<0>(agent), postprocess_uppercase(std::get<1>(agent)));
+				is_added = true;
+				break;
+				}
+				}
+				if (is_added)
+				break;
+				}
+				}
+				}
+				}
+				}
+
+				if (company_and_addresses.empty()) {
+				for (auto& field : fields.at(L"AGENT")) {
+				std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> new_fields;
+				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+				auto str = to_wstring(field, false, true);
+				if (boost::regex_search(str, boost::wregex(L"NO AGENT", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"CLAUSES", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"ENDORSEMENTS", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"SIGNED TO|HAS SIGNED", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"BILLS? OF LADING", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"CARRIER", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"THE MASTER", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"AFFIRM|CONFIRM", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"IN WITNESS", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"THE NUMBER OF", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"NOTIFY", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"DUE TO", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"REASON", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"AGREE", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"THE RIGHTS AND LIABILITIES", boost::regex::icase))
+				|| boost::regex_search(str, boost::wregex(L"AGENTS? [FT][AO]R", boost::regex::icase))) {
+				continue;
+				}
+				new_field.emplace_back(field);
+				if (!new_field.empty())
+				new_fields.insert(std::make_pair(L"AGENT", new_field));
+				company_and_addresses = extract_company_and_address(configuration, category, L"AGENT", new_fields, blocks);
+				if (!company_and_addresses.empty()) {
+				agents.emplace(company_and_addresses[0]);
+				}
+				}
+				}
+
+				if (!company_and_addresses.empty()) {
+				boost::remove_erase_if(company_and_addresses, [](const std::pair<cv::Rect, std::wstring>& addresses) {
+				return std::get<1>(addresses).find(L"IATA CODE") != std::wstring::npos;
+				});
+
+				if (std::get<1>(company_and_addresses[0]).find(L"DOING BUSINESS") != std::wstring::npos
+				|| std::get<1>(company_and_addresses[0]).find(L"ABOVE PARTIC") != std::wstring::npos)
+				company_and_addresses.clear();
+				else
+				agents.emplace(company_and_addresses[0]);
+				}
+
+				std::unordered_set<std::pair<cv::Rect, std::wstring>> new_agents;
+				for (auto& agent_pair : agents) {
+				const auto agent = std::get<1>(agent_pair);
+				auto new_agent = boost::regex_replace(agent, boost::wregex(L"^by ", boost::regex::icase), L"");
+				new_agent = boost::regex_replace(new_agent, boost::wregex(L"^(?:as )?carrier ", boost::regex::icase), L"");
+				new_agent = boost::regex_replace(new_agent, boost::wregex(L"^[ft][ao]r ", boost::regex::icase), L"");
+				new_agent = boost::regex_replace(new_agent, boost::wregex(L"^and ", boost::regex::icase), L"");
+				new_agent = boost::regex_replace(new_agent, boost::wregex(L"^signed by ", boost::regex::icase), L"");
+				new_agent = boost::regex_replace(new_agent, boost::wregex(L"^signed ", boost::regex::icase), L"");
+				new_agent = boost::regex_replace(new_agent, boost::wregex(L"UMITED", boost::regex::icase), L"LIMITED");
+				auto index = new_agent.find(L"AS AGENT");
+				if (index != std::wstring::npos) {
+				new_agent.resize(index);
+				new_agent = boost::trim_copy(new_agent);
+				}
+				if (new_agent.size() < 4)
+				continue;
+				if (!new_agent.empty() && new_agent != L".LTD" && new_agent != L".INC" && new_agent != L"INC." && new_agent != L"LTD."
+				&& !boost::regex_search(new_agent, boost::wregex(L"^PLACE OF RECEIPT"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^(?:SIGNED )?(?:FOR )?[LT]HE (?:CARRIER|GAMER)"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^FOR CARRIER"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^STREET ADDR"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^B/L NO"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^[FE]MC NO"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^FMC/CHB"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^FMC/"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^AMBIGUATY OR"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^[IA]S AGENT [FT]OR"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"PLEASE SEARCH"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^LTD"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^SHIPPER"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^NOT PART"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^REVENUE TONS"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"FREIGHT [PREPAID|COLLECT]"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^ON BEHALF OF"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^\\("))
+				&& !boost::regex_search(new_agent, boost::wregex(L"(?:PORT|PLACE) OF |FINAL DEST|VESSEL"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"BILLS? OF LADING"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"(?:COMBINED TRANSPORT|OF RECEIPT|LADING (?:STATED|INDICATED)|HAS SIGNED|AMENDMENTS|ACKNOWLEDGES|ANY OF |DOCUMENT USED)"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^IHA CVILOUY OF"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^TN\\* \\. NR \\.START"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"COUNTRY OF ORIGIN"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"ACCORDANCE WITH|WITHOUT PREJUDICE|TERMS HERE"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^AIR LIMITED"))
+				&& !boost::regex_search(new_agent, boost::wregex(L"^FREIGHT ALL AS ARRANGE")))
+				new_agents.emplace(std::make_pair(std::get<0>(agent_pair), new_agent));
+				}
+				agents = new_agents;
+				}
+
+				for (auto& agent : agents) {
+				const auto country_code = extract_country_code(configuration, agent, blocks, image_size);
+				agents_cc.emplace_back(std::make_pair(cv::Rect(), country_code));
+				}*/
+
+				return std::make_pair(std::vector<std::pair<cv::Rect, std::wstring>>{std::begin(agents), std::end(agents)}, agents_cc);
+			}
+
+			static std::pair<cv::Rect, std::wstring>
+				extract_precarriage_by(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"PRE CARRIAGE BY") == fields.end())
+					return std::make_pair(cv::Rect(), L"");
+
+				std::vector<std::pair<cv::Rect, std::wstring>> vessel_name;
+
+				if (category == L"BILL OF LADING") {
+					const auto paper = image_size;
+					std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+					for (auto& field : fields.at(L"PRE CARRIAGE BY")) {
+						auto rect = to_rect(field);
+						if (rect.y < paper.height / 2) {
+							new_field.emplace_back(field);
+						}
+					}
+
+					vessel_name = extract_field_values(new_field, blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 2.5, 2.5, false, false, false),
+						preprocess_vessel_name,
+						default_extract,
+						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+
+					if (vessel_name.empty()) {
+						vessel_name = extract_field_values(new_field, blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 6, false, false, false),
+							preprocess_vessel_name,
+							default_extract,
+							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+					}
+
+				}
+
+				boost::remove_erase_if(vessel_name, [](const std::pair<cv::Rect, std::wstring>& vessel) {
+					return boost::regex_search(std::get<1>(vessel), boost::wregex(L"TO BE (?:DECLARED|ADVISED)", boost::regex_constants::icase));
+				});
+
+				if (vessel_name.empty())
+					return std::make_pair(cv::Rect(), L"");
+
+				return vessel_name[0];
+			}
+
+			static std::pair<cv::Rect, std::wstring>
+				extract_vessel_name(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				if (fields.find(L"VESSEL NAME") == fields.end())
+					return std::make_pair(cv::Rect(), L"");
+
+				std::vector<std::pair<cv::Rect, std::wstring>> vessel_name;
+
+				if (category == L"SHIPMENT ADVICE") {
+					vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+						search_self,
+						preprocess_vessel_name,
+						default_extract,
+						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+
+					if (vessel_name.empty())
+						vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 5.0, 8, false),
+							preprocess_vessel_name,
+							default_extract,
+							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+				}
+				else if (category == L"CERTIFICATE") {
+					vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+						search_self,
+						preprocess_vessel_name,
+						default_extract,
+						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+
+					if (vessel_name.empty())
+						vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 8, false),
+							preprocess_vessel_name,
+							default_extract,
+							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+				}
+				else if (category == L"CARGO RECEIPT") {
+					vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2.5, false, false, false),
+						preprocess_vessel_name,
+						default_extract,
+						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+				}
+				else if (category == L"BILL OF LADING") {
+					const auto paper = image_size;
+					std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+					for (auto& field : fields.at(L"VESSEL NAME")) {
+						auto rect = to_rect(field);
+						if (rect.y < paper.height / 2) {
+							new_field.emplace_back(field);
+						}
+					}
+					vessel_name = extract_field_values(new_field, blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.3, 0, 2.5, false, false, false),
+						preprocess_vessel_name,
+						default_extract,
+						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+					if (vessel_name.empty()) {
+						vessel_name = extract_field_values(new_field, blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 2.5, 2.5, false, false, false),
+							preprocess_vessel_name,
+							default_extract,
+							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+					}
+					if (vessel_name.empty()) {
+						vessel_name = extract_field_values(new_field, blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.2, 0.0, 6, false, false, false),
+							preprocess_vessel_name,
+							default_extract,
+							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+					}
+
+				}
+				else if (category == L"LETTER OF GUARANTEE") {
+					vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 1.0, 100, true),
+						preprocess_vessel_name,
+						default_extract,
+						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+				}
+				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST") {
+					vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 1.0, 100, true),
+						preprocess_vessel_name,
+						default_extract,
+						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+					if (vessel_name.empty())
+						vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2, false, false, false),
+							preprocess_vessel_name,
+							default_extract,
+							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
 				}
 				else {
-					//for (auto& a : result) {
-					//	auto value = to_wstring(a);
-					//	value = boost::regex_replace(value, boost::wregex(L"(FOR)(.*)"), L"");
-					//	value = boost::regex_replace(value, boost::wregex(L"(TEL)(.*)"), L"");
-					//	extracted_result.emplace_back(value);
-					//}
-					for (auto& a : result) {
-						extracted_result.emplace_back(to_wstring(a));
-					}
+					vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2, false, false, false),
+						preprocess_vessel_name,
+						default_extract,
+						std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
 
-				}
-
-				return extracted_result;
-
-			}
-
-			static std::vector<std::wstring>
-				extract_agent(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
-			{
-				std::set<std::wstring> agents;
-
-				if (fields.find(L"AGENT") == fields.end())
-					return std::vector<std::wstring>();
-
-				if (category == L"AIR WAYBILL" || category == L"BILL OF LADING") {
-					std::vector<std::wstring> company_and_addresses;
-
-					if (fields.at(L"AGENT").size() > 0) {
-						const auto paper = image_size;
-						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
-						for (auto& field : fields.at(L"AGENT")) {
-							auto rect = to_rect(field);
-							if (rect.y > paper.height * 3 / 4) {
-								new_field.emplace_back(field);
-							}
-						}
-
-						std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> down_side_field;
-						down_side_field.insert(std::make_pair(L"AGENT", new_field));
-
-						if (down_side_field.find(L"AGENT") != down_side_field.end()) {
-							auto agent = extract_field_values(down_side_field.at(L"AGENT"), blocks,
-								search_line,
-								default_preprocess,
-								create_extract_function(L"(?:BY )?(.*) AS AGENTS?(?: FOR)?"),
-								postprocess_uppercase);
-
-							if (!agent.empty()) {
-								agents.emplace(std::get<1>(agent[0]));
-							}
-							else {
-								const auto regex = L"^AS AGENTS?(?: FOR) ?";
-								boost::wregex re(regex, boost::regex_constants::icase);
-								boost::match_results<std::wstring::const_iterator> matches;
-
-								for (auto i = 0; i < down_side_field.at(L"AGENT").size(); i++) {
-									const auto agent_field = down_side_field.at(L"AGENT")[i];
-
-									const auto text = std::get<1>(agent_field);
-									if (boost::regex_search(std::begin(text), std::end(text), matches, re)) {
-										const auto suspected_agents = find_nearest_up_lines(agent_field, blocks, 0.2, 2);
-
-										if (suspected_agents.empty())
-											continue;
-
-										const auto agent = preprocess_company(suspected_agents[0], configuration, L"companies");
-										if (!std::get<1>(agent).empty()) {
-											agents.emplace(postprocess_uppercase(std::get<1>(agent)));
-											break;
-										}
-									}
-								}
-							}
+					if (vessel_name.empty() && category == L"INSURANCE POLICY") {
+						vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 8, false),
+							preprocess_vessel_name,
+							default_extract,
+							std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
+						if (vessel_name.empty()) {
+							vessel_name = extract_field_values(fields.at(L"VESSEL NAME"), blocks,
+								search_self,
+								preprocess_vessel_name,
+								default_extract,
+								std::bind(&selvy::ocr::trade_document_recognizer::postprocess_vessel_name, std::placeholders::_1, configuration));
 						}
 					}
-
-					if (company_and_addresses.empty())
-						company_and_addresses = extract_company_and_address(configuration, category, L"AGENT", fields, blocks);
-
-					if (!company_and_addresses.empty()) {
-						boost::remove_erase_if(company_and_addresses, [](const std::wstring& addresses) {
-							return addresses.find(L"IATA CODE") != std::wstring::npos;
-						});
-
-						agents.emplace(company_and_addresses[0]);
-					}
-					std::set<std::wstring> new_agents;
-					for (auto& agent : agents) {
-						auto new_agent = boost::regex_replace(agent, boost::wregex(L"^by ", boost::regex::icase), L"");
-						new_agent = boost::regex_replace(new_agent, boost::wregex(L"^as carrier ", boost::regex::icase), L"");
-						new_agent = boost::regex_replace(new_agent, boost::wregex(L"^for ", boost::regex::icase), L"");
-						new_agent = boost::regex_replace(new_agent, boost::wregex(L"^and ", boost::regex::icase), L"");
-						if (!new_agent.empty() && !boost::regex_search(new_agent, boost::wregex(L"^PLACE OF RECEIPT"))
-							&& !boost::regex_search(new_agent, boost::wregex(L"^(?:FOR )?THE CARRIER"))
-							&& !boost::regex_search(new_agent, boost::wregex(L"^B/L NO"))
-							&& !boost::regex_search(new_agent, boost::wregex(L"^FMC NO"))
-							&& !boost::regex_search(new_agent, boost::wregex(L"FREIGHT PREPAID")))
-							new_agents.emplace(new_agent);
-					}
-					agents = new_agents;
 				}
 
-				return std::vector<std::wstring>{std::begin(agents), std::end(agents)};
+				boost::remove_erase_if(vessel_name, [](const std::pair<cv::Rect, std::wstring>& vessel) {
+					return boost::regex_search(std::get<1>(vessel), boost::wregex(L"TO BE (?:DECLARED|ADVISED)", boost::regex_constants::icase)); });
+
+				if (vessel_name.empty())
+					return std::make_pair(cv::Rect(), L"");
+
+				return vessel_name[0];
 			}
 
-
-			//static std::wstring
-			static std::vector<std::wstring>
-				extract_vessel_name(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_vessel_name_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				const std::wstring FIELD_NAME = L"VESSEL NAME";
-				std::vector<std::wstring> extracted_result;
 				std::vector<std::pair<cv::Rect, std::wstring>> result;
 
 				result = extract_field_values(fields.at(FIELD_NAME), blocks,
 					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2.5, false, false, false),
-					preprocess_vessel_name,
+					preprocess_vessel_name_2,
 					default_extract,
 					postprocess_uppercase);
 
 				if (result.empty()) {
 					result = extract_field_values(fields.at(FIELD_NAME), blocks,
 						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-						preprocess_vessel_name,
+						preprocess_vessel_name_2,
 						default_extract,
 						postprocess_uppercase);
 				}
 
-
-				if (result.empty()) {
-					extracted_result.emplace_back(L"");
+				for (auto i = 0; i < result.size(); i++) {
+					auto& str = boost::algorithm::trim_copy(boost::to_upper_copy(result.at(i).second));
+					if (str.find(L"RECEIPT") != std::wstring::npos) {
+						result.resize(i);
+						break;
+					}
 				}
-				else {
-					//for (auto& a : result) {
-					extracted_result.emplace_back(to_wstring(result[0]));
-					//}
+			
+				if (!result.empty())
+				{
+					result.erase(result.begin() + 1, result.end());
 				}
 
-				return extracted_result;
-				
+				return result;
 			}
 
-			static std::wstring
+			static std::pair<cv::Rect, std::wstring>
 				extract_goods_description(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"GOODS DESCRIPTION") == fields.end())
-					return L"";
+					return std::make_pair(cv::Rect(), L"");
 
 				std::vector<std::pair<cv::Rect, std::wstring>> good_descriptions;
 
 				if (category == L"BILL OF LADING") {
 					good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
-						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 10, false),
 						std::bind(&trade_document_recognizer::preprocess_good_description,
-						std::placeholders::_1),
+							std::placeholders::_1),
 						default_extract,
 						std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 
 					const auto paper = image_size;
 					boost::remove_erase_if(good_descriptions, [&paper](const std::pair<cv::Rect, std::wstring>& block) {
 						const auto block_rect = to_rect(block);
-						return block_rect.y < paper.height / 2 || block_rect.x > paper.width / 2;
+						return block_rect.y < paper.height / 3 || block_rect.x > paper.width / 2;
 					});
 				}
 				else if (category == L"INSURANCE POLICY") {
-					good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
+					std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_fields;
+					for (auto& field : fields.at(L"GOODS DESCRIPTION")) {
+						auto str = to_wstring(field, false, true);
+						if (str.size() < 110) {
+							new_fields.emplace_back(field);
+						}
+					}
+					good_descriptions = extract_field_values(new_fields, blocks,
 						search_self,
 						std::bind(&trade_document_recognizer::preprocess_good_description, std::placeholders::_1),
 						default_extract,
 						std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 
 					if (good_descriptions.empty()) {
-						good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
+						good_descriptions = extract_field_values(new_fields, blocks,
 							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 							std::bind(&trade_document_recognizer::preprocess_good_description,
-							std::placeholders::_1),
+								std::placeholders::_1),
 							default_extract,
 							std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 					}
 
 					if (good_descriptions.empty()) {
-						good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
+						good_descriptions = extract_field_values(new_fields, blocks,
 							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
 							std::bind(&trade_document_recognizer::preprocess_good_description,
-							std::placeholders::_1),
+								std::placeholders::_1),
 							default_extract,
 							std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 					}
@@ -13690,7 +19180,7 @@ namespace selvy {
 					good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
 						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 						std::bind(&trade_document_recognizer::preprocess_good_description,
-						std::placeholders::_1),
+							std::placeholders::_1),
 						default_extract,
 						std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 				}
@@ -13698,32 +19188,54 @@ namespace selvy {
 					good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
 						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 6, false),
 						std::bind(&trade_document_recognizer::preprocess_good_description,
-						std::placeholders::_1),
+							std::placeholders::_1),
 						default_extract,
 						std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 				}
 				else if (category == L"EXPORT PERMIT") {
-					good_descriptions = extract_field_values(fields.at(L"GOOD DESCRIPTION"), blocks,
+					std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_fields;
+					for (auto& field : fields.at(L"GOODS DESCRIPTION")) {
+						auto str = to_wstring(field, false, true);
+						if (boost::regex_search(str, boost::wregex(L"란번호", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"규격", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"총란수", boost::regex::icase)))
+							continue;
+						new_fields.emplace_back(field);
+					}
+					good_descriptions = extract_field_values(new_fields, blocks,
 						search_self,
 						std::bind(&trade_document_recognizer::preprocess_good_description,
-						std::placeholders::_1),
+							std::placeholders::_1),
 						default_extract,
 						std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 
 					if (good_descriptions.empty()) {
-						good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
+						good_descriptions = extract_field_values(new_fields, blocks,
 							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 5, false),
 							std::bind(&trade_document_recognizer::preprocess_good_description,
-							std::placeholders::_1),
+								std::placeholders::_1),
 							default_extract,
 							std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
+					}
+					else {
+						auto good_descriptions2 = extract_field_values(new_fields, blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 5, false),
+							std::bind(&trade_document_recognizer::preprocess_good_description,
+								std::placeholders::_1),
+							default_extract,
+							std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
+						if (!good_descriptions2.empty()) {
+							for (auto& goods : good_descriptions2) {
+								good_descriptions.emplace_back(goods);
+							}
+						}
 					}
 				}
 				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST") {
 					good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
-						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 12, false),
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.15, 0.5, 12, false),
 						std::bind(&trade_document_recognizer::preprocess_good_description,
-						std::placeholders::_1),
+							std::placeholders::_1),
 						default_extract,
 						std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 				}
@@ -13731,7 +19243,7 @@ namespace selvy {
 					good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
 						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 5, false),
 						std::bind(&trade_document_recognizer::preprocess_good_description,
-						std::placeholders::_1),
+							std::placeholders::_1),
 						default_extract,
 						std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 				}
@@ -13739,7 +19251,7 @@ namespace selvy {
 					good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
 						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 2.5, false),
 						std::bind(&trade_document_recognizer::preprocess_good_description,
-						std::placeholders::_1),
+							std::placeholders::_1),
 						default_extract,
 						std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 
@@ -13747,7 +19259,7 @@ namespace selvy {
 						good_descriptions = extract_field_values(fields.at(L"GOODS DESCRIPTION"), blocks,
 							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.1, 0.0, 10, false, false, false),
 							std::bind(&trade_document_recognizer::preprocess_good_description,
-							std::placeholders::_1),
+								std::placeholders::_1),
 							default_extract,
 							std::bind(&trade_document_recognizer::postprocess_goods_description, std::placeholders::_1, configuration));
 					}
@@ -13760,27 +19272,65 @@ namespace selvy {
 					trie.case_insensitive().remove_overlaps().allow_space();
 					build_trie(trie, dictionary);
 
-					for (auto it = std::rbegin(good_descriptions); it != std::rend(good_descriptions); it++) {
-						const auto text = std::get<1>(*it);
-						const auto matches = trie.parse_text(text);
+					if (category == L"EXPORT PERMIT") {
+						for (auto it = std::rbegin(good_descriptions); it != std::rend(good_descriptions); it++) {
+							auto rect = std::get<0>(*it);
+							auto text = std::get<1>(*it);
+							if (boost::regex_search(text, boost::wregex(L"^GTOTAL", boost::regex::icase))
+								|| boost::regex_search(text, boost::wregex(L"^LAMINATED", boost::regex::icase))
+								|| boost::regex_search(text, boost::wregex(L"TOTAL", boost::regex::icase))) {
+								text.clear();
+							}
+							const auto matches = trie.parse_text(text);
 
-						if (!matches.empty())
-							return text;
+							if (!matches.empty()) {
+								return std::make_pair(rect, text);
+							}
+
+						}
+						return good_descriptions.back();
 					}
+					else {
+						for (auto it = std::begin(good_descriptions); it != std::end(good_descriptions); it++) {
+							auto rect = std::get<0>(*it);
+							auto text = std::get<1>(*it);
+							text = boost::regex_replace(text, boost::wregex(L"^COMMODITY:?", boost::regex::icase), L"");
+							text = boost::regex_replace(text, boost::wregex(L"^GTOTAL", boost::regex::icase), L"");
+							if (boost::regex_search(text, boost::wregex(L"^GTOTAL", boost::regex::icase))
+								|| boost::regex_search(text, boost::wregex(L"^LAMINATED", boost::regex::icase))
+								|| boost::regex_search(text, boost::wregex(L"TOTAL", boost::regex::icase))) {
+								text.clear();
+							}
+							const auto matches = trie.parse_text(text);
 
-					return std::get<1>(good_descriptions.back());
+							if (!matches.empty()) {
+								return std::make_pair(rect, text);
+							}
+						}
+						auto goods = to_wstring(good_descriptions.back());
+						if (boost::regex_search(goods, boost::wregex(L"^GTOTAL", boost::regex::icase))
+							|| boost::regex_search(goods, boost::wregex(L"^LAMINATED", boost::regex::icase))
+							|| boost::regex_search(goods, boost::wregex(L"TOTAL", boost::regex::icase))) {
+							return std::make_pair(cv::Rect(), L"");
+						}
+						if (boost::regex_replace(goods, boost::wregex(L"[0-9]", boost::regex::icase), L"").empty()) {
+							return std::make_pair(cv::Rect(), L"");
+						}
+
+						return good_descriptions.back();
+					}
 				}
 
-				return L"";
+				return std::make_pair(cv::Rect(), L"");
 			}
 
-			static std::wstring
+			static std::pair<cv::Rect, std::wstring>
 				extract_origin(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (fields.find(L"ORIGIN") == fields.end())
-					return L"";
+					return std::make_pair(cv::Rect(), L"");
 
 				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> filtered_fields;
 				std::copy_if(std::cbegin(fields.at(L"ORIGIN")), std::cend(fields.at(L"ORIGIN")), std::back_inserter(filtered_fields), [&image_size](const std::tuple<cv::Rect, std::wstring, cv::Range>& origin) {
@@ -13793,14 +19343,14 @@ namespace selvy {
 					origins = extract_field_values(filtered_fields, blocks,
 						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 1.0, 100, true),
 						std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-						configuration, L"countries"),
+							configuration, L"countries"),
 						default_extract,
 						postprocess_uppercase);
 					if (origins.empty()) {
 						origins = extract_field_values(filtered_fields, blocks,
 							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
 							std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-							configuration, L"countries"),
+								configuration, L"countries"),
 							default_extract,
 							postprocess_uppercase);
 					}
@@ -13809,7 +19359,7 @@ namespace selvy {
 						origins = extract_field_values(filtered_fields, blocks,
 							search_self,
 							std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-							configuration, L"countries"),
+								configuration, L"countries"),
 							default_extract,
 							postprocess_uppercase);
 					}
@@ -13818,16 +19368,48 @@ namespace selvy {
 						origins = extract_field_values(filtered_fields, blocks,
 							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.35, 0.5, 7, false, false, false),
 							std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-							configuration, L"countries"),
+								configuration, L"countries"),
 							default_extract,
 							postprocess_uppercase);
 					}
 				}
-				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST" || category == L"INSURANCE POLICY" || category == L"CERTIFICATE" || category == L"BILL OF LADING") {
+				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST") {
 					origins = extract_field_values(filtered_fields, blocks,
 						search_self,
 						std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-						configuration, L"countries"),
+							configuration, L"countries"),
+						default_extract,
+						postprocess_uppercase);
+					if (origins.empty()) {
+						origins = extract_field_values(filtered_fields, blocks,
+							search_line,
+							std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
+								configuration, L"countries"),
+							default_extract,
+							postprocess_uppercase);
+					}
+					if (origins.empty()) {
+						origins = extract_field_values(filtered_fields, blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.35, 0.5, 3, false),
+							std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
+								configuration, L"countries"),
+							default_extract,
+							postprocess_uppercase);
+					}
+					if (origins.empty()) {
+						origins = extract_field_values(filtered_fields, blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.35, 0.5, 3, false, false, false),
+							std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
+								configuration, L"countries"),
+							default_extract,
+							postprocess_uppercase);
+					}
+				}
+				else if (category == L"INSURANCE POLICY" || category == L"CERTIFICATE" || category == L"BILL OF LADING") {
+					origins = extract_field_values(filtered_fields, blocks,
+						search_self,
+						std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
+							configuration, L"countries"),
 						default_extract,
 						postprocess_uppercase);
 				}
@@ -13835,35 +19417,35 @@ namespace selvy {
 					origins = extract_field_values(filtered_fields, blocks,
 						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 1.0, 100, true),
 						std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-						configuration, L"countries"),
+							configuration, L"countries"),
 						default_extract,
 						postprocess_uppercase);
 					if (origins.empty()) {
 						origins = extract_field_values(filtered_fields, blocks,
 							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
 							std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-							configuration, L"countries"),
+								configuration, L"countries"),
 							default_extract,
 							postprocess_uppercase);
 					}
 				}
 
 				if (!origins.empty()) {
-					return create_postprocess_function(configuration, L"country-countrycode.csv")(std::get<1>(origins[0]));
+					return std::make_pair(std::get<0>(origins[0]), create_postprocess_function(configuration, L"country-countrycode.csv")(std::get<1>(origins[0])));
 				}
 
-				return L"";
+				return std::make_pair(cv::Rect(), L"");
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_company_and_address(const configuration& configuration, const std::wstring& category, const std::wstring& basis,
-				const std::wstring& below,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks)
+					const std::wstring& below,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks)
 			{
 				if (fields.find(basis) == fields.end() || fields.find(below) == fields.end())
-					return std::vector<std::wstring>();
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 				for (const auto& basis_field : fields.at(basis)) {
 					const auto suspected_below_fields = find_nearest_down_lines(basis_field, blocks);
@@ -13881,11 +19463,13 @@ namespace selvy {
 										return rect.height > basis_rect.height * 1.2;
 									});
 								}
-								auto right_field = std::make_tuple(std::get<0>(suspected_field_values[0]), std::get<1>(suspected_field_values[0]), cv::Range());
+								if (suspected_field_values.size() > 0) {
+									auto right_field = std::make_tuple(std::get<0>(suspected_field_values[0]), std::get<1>(suspected_field_values[0]), cv::Range());
 
-								auto temp_suspected_field_values = find_down_lines(right_field, blocks);
-								for (const auto& temp : temp_suspected_field_values) {
-									suspected_field_values.emplace_back(temp);
+									auto temp_suspected_field_values = find_down_lines(right_field, blocks);
+									for (const auto& temp : temp_suspected_field_values) {
+										suspected_field_values.emplace_back(temp);
+									}
 								}
 							}
 
@@ -13896,10 +19480,9 @@ namespace selvy {
 
 							std::transform(std::begin(suspected_field_values), std::end(suspected_field_values),
 								std::begin(suspected_field_values), [](const std::pair<cv::Rect, std::wstring>& field) {
-								return std::make_pair(std::get<0>(field),
-									boost::regex_replace(std::get<1>(field),
-									boost::wregex(L"[^\\.,a-zA-Z0-9-]"),
-									L""));
+								auto preprocessed = boost::regex_replace(std::get<1>(field), boost::wregex(L"[^ \\.,a-zA-Z0-9()&/-]"), L"");
+								preprocessed = boost::regex_replace(preprocessed, boost::wregex(L"COLTD.?", boost::regex_constants::icase), L"CO.,LTD.");
+								return std::make_pair(std::get<0>(field), preprocessed);
 							});
 
 							boost::remove_erase_if(suspected_field_values,
@@ -13944,18 +19527,22 @@ namespace selvy {
 									}
 								}
 
-								std::vector<std::wstring> basis_fields;
+								std::vector<std::pair<cv::Rect, std::wstring>> basis_fields;
 								for (auto i = 1; i < suspected_field_values.size(); i++) {
 									auto r1 = to_rect(suspected_field_values[0]);
 									auto r2 = to_rect(suspected_field_values[i]);
-									if (r2.x > r1.br().x) {
+									if (r2.x >(r1.x + r1.br().x) / 2) {
 										suspected_field_values.erase(suspected_field_values.begin() + i);
 										i--;
 									}
 								}
 								std::transform(std::begin(suspected_field_values), std::end(suspected_field_values),
 									std::back_inserter(basis_fields), [](const std::pair<cv::Rect, std::wstring>& field) {
-									return postprocess_uppercase(to_wstring(field));
+									auto str = to_wstring(field);
+									str = boost::regex_replace(str, boost::wregex(L"LG CHA\\(LTD\\.", boost::regex::icase), L"LG CHEM,LTD.");
+									str = boost::regex_replace(str, boost::wregex(L"LG (?:CHBJ|OHEM),\\s*LTD\\.", boost::regex::icase), L"LG CHEM,LTD.");
+									str = boost::regex_replace(str, boost::wregex(L"SOLTH KOREA", boost::regex::icase), L"SOUTH KOREA");
+									return std::make_pair(std::get<0>(field), postprocess_uppercase(str));
 								});
 
 								return basis_fields;
@@ -13964,46 +19551,65 @@ namespace selvy {
 					}
 				}
 
-				return std::vector<std::wstring>();
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_bank_and_address(const configuration& configuration, const std::wstring& category, const std::wstring& basis,
-				const std::wstring& below,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks)
+					const std::wstring& below,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks)
 			{
 				if (fields.find(basis) == fields.end() || fields.find(below) == fields.end())
-					return std::vector<std::wstring>();
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 				for (const auto& basis_field : fields.at(basis)) {
+					auto basis_rect = to_rect(basis_field);
 					auto basis_range = std::get<2>(basis_field);
-					if (basis_range.start > 5) {
+					if (basis_range.start > 3) {
 						continue;
 					}
 					auto basis_bank = to_wstring(basis_field, true);
 					auto first_line = boost::regex_replace(basis_bank, boost::wregex(L": "), L"");
+					auto first_rect = to_rect(basis_field);
+
 					auto suspected_swift_code = boost::regex_replace(basis_bank, boost::wregex(L"[^a-zA-Z0-9]"), L"");
+					if (suspected_swift_code.find(L"SWIFT") != std::wstring::npos)
+						suspected_swift_code = L"";
 
 					auto suspected_below_fields = find_down_lines(basis_field, blocks, 0.2);
 
 					for (const auto& below_fields : fields.at(below)) {
-						std::vector<std::wstring> bank_and_address;
+						auto below_rect = to_rect(below_fields);
+						if (below_rect.y <= basis_rect.y)
+							continue;
+						auto below_range = std::get<2>(below_fields);
+						if (below_range.start > 3) {
+							continue;
+						}
+
+						std::vector<std::pair<cv::Rect, std::wstring>> bank_and_address;
 
 						if (suspected_swift_code.size() >= 5) {
-							bank_and_address.emplace_back(first_line);
+							bank_and_address.emplace_back(std::make_pair(first_rect, first_line));
 							if (to_rect(suspected_below_fields[0]) == to_rect(below_fields)) {
 								suspected_below_fields = find_down_lines(basis_field, blocks, 0.25);
 							}
 						}
 						else {
 							auto basis_right_line = find_nearest_right_line(basis_field, blocks);
-							suspected_swift_code = boost::regex_replace(to_wstring(basis_right_line, true), boost::wregex(L"^a-zA-Z0-9]"), L"");
+							suspected_swift_code = boost::regex_replace(to_wstring(basis_right_line, true), boost::wregex(L"[^a-zA-Z0-9]"), L"");
+							if (suspected_swift_code.find(L"SWIFT") != std::wstring::npos)
+								suspected_swift_code = L"";
+
 							if (suspected_swift_code.size() >= 5) {
-								auto first_line = boost::regex_replace(to_wstring(basis_right_line), boost::wregex(L": "), L"");
-								bank_and_address.emplace_back(first_line);
-								if (to_rect(suspected_below_fields[0]) == to_rect(below_fields)) {
+								auto first_line = boost::regex_replace(to_wstring(basis_right_line), boost::wregex(L": ?"), L"");
+								auto first_rect = to_rect(basis_right_line);
+								bank_and_address.emplace_back(std::make_pair(first_rect, first_line));
+								auto suspected_below_first_line_str = to_wstring(suspected_below_fields[0]);
+								if (to_rect(suspected_below_fields[0]) == to_rect(below_fields) || to_rect(suspected_below_fields[1]) == to_rect(below_fields)
+									|| suspected_below_first_line_str.find(L"SWIFT") != std::wstring::npos) {
 									auto right_field = std::make_tuple(std::get<0>(basis_right_line[0]), std::get<1>(basis_right_line[0]), cv::Range());
 									suspected_below_fields = find_down_lines(right_field, blocks);
 								}
@@ -14016,11 +19622,10 @@ namespace selvy {
 								auto right_field = std::make_tuple(std::get<0>(basis_right_line[0]), std::get<1>(basis_right_line[0]), cv::Range());
 								suspected_below_fields = find_down_lines(right_field, blocks);
 								if (!suspected_below_fields.empty()) {
-									bank_and_address.emplace_back(to_wstring(basis_right_line));
+									bank_and_address.emplace_back(std::make_pair(to_rect(basis_right_line), to_wstring(basis_right_line)));
 								}
 							}
 						}
-
 
 						for (auto i = 0; i < suspected_below_fields.size(); i++) {
 							if (to_rect(suspected_below_fields[i]).br().y >= to_rect(below_fields).y) {
@@ -14033,45 +19638,64 @@ namespace selvy {
 									break;
 								}
 							}
+							if (i > 1 && find_company(suspected_below_fields[i], configuration, L"companies"))
+								break;
 							const auto field = preprocess_remove_phone_number(to_wstring(suspected_below_fields[i]));
-							if (!field.empty())
-								bank_and_address.emplace_back(field);
+							if (!field.empty()) {
+								bank_and_address.emplace_back(std::make_pair(to_rect(suspected_below_fields[i]), field));
+							}
 						}
 
 						std::transform(std::begin(bank_and_address), std::end(bank_and_address),
-							std::begin(bank_and_address), [](const std::wstring& field) {
-							return postprocess_uppercase(field);
+							std::begin(bank_and_address), [](const std::pair<cv::Rect, std::wstring>& field) {
+							return std::make_pair(std::get<0>(field), postprocess_uppercase(std::get<1>(field)));
 						});
 
 						if (!bank_and_address.empty())
 							return bank_and_address;
 					}
-					if (fields.at(below).empty()) {
-						std::vector<std::wstring> bank_and_address;
+
+					if (fields.at(below).empty() || below == basis) {
+						std::vector<std::pair<cv::Rect, std::wstring>> bank_and_address;
 						if (suspected_swift_code.size() >= 5) {
-							bank_and_address.emplace_back(first_line);
+							bank_and_address.emplace_back(std::make_pair(first_rect, first_line));
 							suspected_below_fields = find_nearest_down_lines(basis_field, blocks, 0.25, 0.0, 10, true);
 						}
 						else {
 							auto basis_right_line = find_nearest_right_line(basis_field, blocks);
 							suspected_swift_code = boost::regex_replace(to_wstring(basis_right_line, true), boost::wregex(L"[^a-zA-Z0-9]"), L"");
 							if (suspected_swift_code.size() >= 5) {
-								auto first_line = boost::regex_replace(to_wstring(basis_right_line), boost::wregex(L": "), L"");
-								bank_and_address.emplace_back(first_line);
+								auto first_line = boost::regex_replace(to_wstring(basis_right_line), boost::wregex(L": ?"), L"");
+								bank_and_address.emplace_back(std::make_pair(to_rect(basis_right_line), first_line));
 								auto right_field = std::make_tuple(std::get<0>(basis_right_line[0]), std::get<1>(basis_right_line[0]), cv::Range());
 								suspected_below_fields = find_nearest_down_lines(right_field, blocks, 0.25, 0.0, 10, true);
+								const auto tgt_rect = to_rect(right_field);
+								for (auto i = 0; i < suspected_below_fields.size(); i++) {
+									const auto& field = suspected_below_fields[i];
+									const auto rect = to_rect(field);
+									if (tgt_rect.x - 100 > rect.x) {
+										suspected_below_fields.resize(i);
+										break;
+									}
+
+									const auto str = to_wstring(field);
+									if (str.find(L':') != std::wstring::npos) {
+										suspected_below_fields.resize(i);
+										break;
+									}
+								}
 							}
 						}
 
 						for (auto i = 0; i < suspected_below_fields.size(); i++) {
 							const auto field = preprocess_remove_phone_number(to_wstring(suspected_below_fields[i]));
 							if (!field.empty())
-								bank_and_address.emplace_back(field);
+								bank_and_address.emplace_back(std::make_pair(to_rect(suspected_below_fields[i]), field));
 						}
 
 						std::transform(std::begin(bank_and_address), std::end(bank_and_address),
-							std::begin(bank_and_address), [](const std::wstring& field) {
-							return postprocess_uppercase(field);
+							std::begin(bank_and_address), [](const std::pair<cv::Rect, std::wstring>& field) {
+							return std::make_pair(std::get<0>(field), postprocess_uppercase(std::get<1>(field)));
 						});
 
 						if (!bank_and_address.empty())
@@ -14079,39 +19703,39 @@ namespace selvy {
 					}
 				}
 
-				return std::vector<std::wstring>();
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_company(const configuration& configuration, const std::wstring& category, const std::wstring& field,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks)
 			{
 				if (fields.find(field) == fields.end())
-					return std::vector<std::wstring>();
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 				const auto company = extract_field_values(fields.at(field), blocks,
 					std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 					std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-					configuration, L"companies"),
+						configuration, L"companies"),
 					default_extract,
 					postprocess_uppercase);
 
 				if (company.empty()) {
-					return std::vector<std::wstring>();
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
 				}
 
-				return std::vector<std::wstring>{ to_wstring(company[0]) };
+				return std::vector<std::pair<cv::Rect, std::wstring>>{ company[0] };
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_company_and_address(const configuration& configuration, const std::wstring& category, const std::wstring& field,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
-				fields,
-				const std::vector<block>& blocks)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>&
+					fields,
+					const std::vector<block>& blocks)
 			{
-				std::vector<std::wstring> company_and_address;
+				std::vector<std::pair<cv::Rect, std::wstring>> company_and_address;
 
 				if (fields.find(field) == fields.end())
 					return company_and_address;
@@ -14129,24 +19753,24 @@ namespace selvy {
 						company = extract_field_values(fields.at(field), blocks,
 							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 1.0, 10, true),
 							std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-							configuration, L"companies"),
+								configuration, L"companies"),
 							default_extract,
 							postprocess_uppercase);
 					}
 
 					if (!company.empty()) {
-						company_and_address.emplace_back(postprocess_uppercase(to_wstring(company[0])));
+						company_and_address.emplace_back(std::make_pair(to_rect(company[0]), postprocess_uppercase(to_wstring(company[0]))));
 						const auto address_blocks = find_nearest_down_lines(to_block(company[0]), blocks, 0.5, 0.0, 2, false);
 						for (auto i = 0; i < address_blocks.size(); i++) {
 							const auto address_block = address_blocks[i];
-							company_and_address.emplace_back(postprocess_uppercase(to_wstring(address_block)));
+							company_and_address.emplace_back(std::make_pair(to_rect(address_block), postprocess_uppercase(to_wstring(address_block))));
 							if (find_address_country(address_block, configuration, L"countries", i))
 								break;
 						}
 					}
 
 					for (auto i = 0; i < company_and_address.size(); i++) {
-						if (boost::regex_search(company_and_address[i], boost::wregex(L"SHIPPER"))) {
+						if (boost::regex_search(std::get<1>(company_and_address[i]), boost::wregex(L"SHIPPER"))) {
 							company_and_address.resize(i);
 							break;
 						}
@@ -14155,28 +19779,89 @@ namespace selvy {
 					return company_and_address;
 				}
 
-				if (company.empty() && field != L"ISSUING BANK") {
+				if (company.empty() && (category == L"FIRM OFFER" || category == L"BILL OF LADING")) {
 					company = extract_field_values(fields.at(field), blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+						search_self,
 						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-						configuration, L"companies"),
+							configuration, L"companies"),
 						default_extract,
 						postprocess_uppercase);
 				}
 
-				if (company.empty() && (category != L"BILL OF LADING" && category != L"CARGO RECEIPT")) {
+				if (company.empty() && (category == L"COMMERCIAL INVOICE" && field == L"SELLER")) {
+					int max_basis_char_count = 0;
+					for (auto& basis : fields.at(field)) {
+						auto basis_str = to_wstring(basis, false, true);
+						if (max_basis_char_count < basis_str.size()) {
+							max_basis_char_count = basis_str.size();
+						}
+					}
+					auto expanded_ratio = max_basis_char_count < 17 ? 1.5 : 0.0;
 					company = extract_field_values(fields.at(field), blocks,
-						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.15, expanded_ratio, 4, false, false, true),
 						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-						configuration, L"companies"),
+							configuration, L"companies"),
 						default_extract,
 						postprocess_uppercase);
 				}
-				if (company.empty() && category == L"FIRM OFFER") {
+				if (company.empty() && ((category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST") && (field == L"APPLICANT" || field == L"BUYER"))) {
 					company = extract_field_values(fields.at(field), blocks,
 						search_self,
 						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-						configuration, L"companies"),
+							configuration, L"companies"),
+						default_extract,
+						postprocess_uppercase);
+					if (company.empty()) {
+						int max_basis_char_count = 0;
+						for (auto& basis : fields.at(field)) {
+							auto basis_str = to_wstring(basis, false, true);
+							if (max_basis_char_count < basis_str.size()) {
+								max_basis_char_count = basis_str.size();
+							}
+						}
+						auto cutting_ratio = max_basis_char_count < 10 ? 2.0 : 0.7;
+						company = extract_field_values(fields.at(field), blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.15, 0.0, cutting_ratio, false),
+							std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+								configuration, L"companies"),
+							default_extract,
+							postprocess_uppercase);
+					}
+
+				}
+				if (company.empty() && (category == L"FIRM OFFER" || category == L"BILL OF LADING")) {
+					company = extract_field_values(fields.at(field), blocks,
+						search_self,
+						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+							configuration, L"companies"),
+						default_extract,
+						postprocess_uppercase);
+				}
+				if (company.empty() && field != L"ISSUING BANK") {
+					if (field == L"AGENT" && boost::regex_search(to_wstring(fields.at(field)[0]), boost::wregex(L"PLEASE APPLY$", boost::regex::icase))) {
+						company = extract_field_values(fields.at(field), blocks,
+							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 6, false),
+							std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+								configuration, L"companies"),
+							default_extract,
+							postprocess_uppercase);
+					}
+					else {
+						company = extract_field_values(fields.at(field), blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 6, false, false, false),
+							std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+								configuration, L"companies"),
+							default_extract,
+							postprocess_uppercase);
+					}
+				}
+
+				if (company.empty() && (category != L"BILL OF LADING" && category != L"CARGO RECEIPT"
+					&& category != L"COMMERCIAL INVOICE"&& category != L"PACKING LIST")) {
+					company = extract_field_values(fields.at(field), blocks,
+						std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 5, false),
+						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+							configuration, L"companies"),
 						default_extract,
 						postprocess_uppercase);
 				}
@@ -14184,12 +19869,12 @@ namespace selvy {
 				if (company.empty()) {
 					int max_basis_char_count = 0;
 					for (auto& basis : fields.at(field)) {
-						auto basis_str = to_wstring(basis);
+						auto basis_str = to_wstring(basis, false, true);
 						if (max_basis_char_count < basis_str.size()) {
 							max_basis_char_count = basis_str.size();
 						}
 					}
-					auto expanded_ratio = max_basis_char_count < 10 ? 1.0 : 0.2;
+					auto expanded_ratio = max_basis_char_count < 10 ? 1.0 : max_basis_char_count < 20 ? 0.2 : 0.0;
 					company = extract_field_values(fields.at(field), blocks,
 						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.15, expanded_ratio, 100, true, false, false),
 						default_preprocess,
@@ -14217,7 +19902,7 @@ namespace selvy {
 							auto company_name = extract_field_values(fields.at(field), blocks,
 								search_self,
 								std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-								configuration, L"companies"),
+									configuration, L"companies"),
 								default_extract,
 								postprocess_uppercase);
 							if (company_name.empty() && category == L"FIRM OFFER" && field == L"COLLECTING BANK") {
@@ -14229,25 +19914,25 @@ namespace selvy {
 								}
 							}
 							if (!company_name.empty() && is_close) {
-								company_and_address.emplace_back(to_wstring(company_name));
+								company_and_address.emplace_back(std::make_pair(to_rect(company_name), to_wstring(company_name)));
 								include_company = true;
 							}
 						}
 
 						if (is_close) {
 							for (auto i = 0; i < company.size(); i++) {
-								company_and_address.emplace_back(postprocess_uppercase(to_wstring(company[i])));
-								if (find_address_country(company[i], configuration, L"countries", i))
+								company_and_address.emplace_back(std::make_pair(to_rect(company[i]), postprocess_uppercase(to_wstring(company[i]))));
+								if (i > 0 && find_address_country(company[i], configuration, L"countries", i))
 									break;
 							}
 						}
 						if (category == L"FIRM OFFER") {
 							for (auto i = 0; i < company_and_address.size(); i++) {
-								company_and_address[i] = boost::regex_replace(company_and_address[i], boost::wregex(L"^ADDRESS: ?", boost::regex::icase), L"");
-								if (boost::regex_search(company_and_address[i], boost::wregex(L"PLEASED", boost::regex::icase))
-									|| boost::regex_search(company_and_address[i], boost::wregex(L"PORT OF", boost::regex::icase))
-									|| boost::regex_search(company_and_address[i], boost::wregex(L"PAYMENT", boost::regex::icase))
-									|| boost::regex_search(company_and_address[i], boost::wregex(L"DATE", boost::regex::icase))) {
+								std::get<1>(company_and_address[i]) = boost::regex_replace(std::get<1>(company_and_address[i]), boost::wregex(L"^ADDRESS: ?", boost::regex::icase), L"");
+								if (boost::regex_search(std::get<1>(company_and_address[i]), boost::wregex(L"PLEASED", boost::regex::icase))
+									|| boost::regex_search(std::get<1>(company_and_address[i]), boost::wregex(L"PORT OF", boost::regex::icase))
+									|| boost::regex_search(std::get<1>(company_and_address[i]), boost::wregex(L"PAYMENT", boost::regex::icase))
+									|| boost::regex_search(std::get<1>(company_and_address[i]), boost::wregex(L"DATE", boost::regex::icase))) {
 									company_and_address.resize(i);
 									break;
 								}
@@ -14255,8 +19940,8 @@ namespace selvy {
 						}
 						else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST") {
 							for (auto i = 0; i < company_and_address.size(); i++) {
-								if (boost::regex_search(company_and_address[i], boost::wregex(L"SHIPPED PER", boost::wregex::icase))
-									|| boost::regex_search(company_and_address[i], boost::wregex(L"ON OR ABOUT", boost::regex::icase))) {
+								if (boost::regex_search(std::get<1>(company_and_address[i]), boost::wregex(L"SHIPPED PER", boost::regex::icase))
+									|| boost::regex_search(std::get<1>(company_and_address[i]), boost::wregex(L"ON OR ABOUT", boost::regex::icase))) {
 									company_and_address.resize(i);
 									break;
 								}
@@ -14266,7 +19951,7 @@ namespace selvy {
 					}
 				}
 				else {
-					company_and_address.emplace_back(postprocess_uppercase(to_wstring(company[0])));
+					company_and_address.emplace_back(std::make_pair(to_rect(company[0]), postprocess_uppercase(to_wstring(company[0]))));
 					const auto address_blocks = find_nearest_down_lines(to_block(company[0]), blocks, 0.5, 0.0, 10, true);
 					for (auto i = 0; i < address_blocks.size(); i++) {
 						const auto address_block = address_blocks[i];
@@ -14277,43 +19962,114 @@ namespace selvy {
 							break;
 						}
 
-						company_and_address.emplace_back(postprocess_uppercase(to_wstring(address_block)));
+						company_and_address.emplace_back(std::make_pair(to_rect(address_block), postprocess_uppercase(to_wstring(address_block))));
 						if (find_address_country(address_block, configuration, L"countries", i))
 							break;
 					}
 				}
 
 				for (auto i = 0; i < company_and_address.size(); i++) {
-					if (boost::regex_search(company_and_address[i], boost::wregex(L"(?:GOODS? ) ?DESCRIPTION"))) {
+					if (boost::regex_search(std::get<1>(company_and_address[i]), boost::wregex(L"(?:GOODS? )?DESCRIPTION"))) {
 						company_and_address.resize(i);
 						break;
 					}
 				}
 
 				if (!company_and_address.empty()) {
-					company_and_address[0] = boost::regex_replace(company_and_address[0], boost::wregex(L"^(?:TO )?THE ORDER OF:?", boost::regex::icase), L"");
-					company_and_address[0] = boost::regex_replace(company_and_address[0], boost::wregex(L"^TO ORDER", boost::regex::icase), L"");
-					company_and_address[0] = boost::regex_replace(company_and_address[0], boost::wregex(L"^TO ", boost::regex::icase), L"");
-					company_and_address[0] = boost::regex_replace(company_and_address[0], boost::wregex(L"^: ?", boost::regex::icase), L"");
-					company_and_address[0] = boost::trim_copy(company_and_address[0]);
+					std::get<1>(company_and_address[0]) = boost::regex_replace(std::get<1>(company_and_address[0]), boost::wregex(L"^(?:TO )?THE ORDER OF:?", boost::regex::icase), L"");
+					std::get<1>(company_and_address[0]) = boost::regex_replace(std::get<1>(company_and_address[0]), boost::wregex(L"^TO ORDER", boost::regex::icase), L"");
+					std::get<1>(company_and_address[0]) = boost::regex_replace(std::get<1>(company_and_address[0]), boost::wregex(L"^TO ", boost::regex::icase), L"");
+					std::get<1>(company_and_address[0]) = boost::regex_replace(std::get<1>(company_and_address[0]), boost::wregex(L"^: ?", boost::regex::icase), L"");
+					std::get<1>(company_and_address[0]) = boost::regex_replace(std::get<1>(company_and_address[0]), boost::wregex(L"^NAME:?", boost::regex::icase), L"");
+					std::get<1>(company_and_address[0]) = boost::regex_replace(std::get<1>(company_and_address[0]), boost::wregex(L"^MESSRS. ?", boost::regex::icase), L"");
+					std::get<1>(company_and_address[0]) = boost::regex_replace(std::get<1>(company_and_address[0]), boost::wregex(L"^I PT.", boost::regex::icase), L"PT.");
+					if (company_and_address.size() > 1) {
+						std::get<1>(company_and_address[1]) = boost::regex_replace(std::get<1>(company_and_address[1]), boost::wregex(L"^ADDRESS(:|\\.’)?", boost::regex::icase), L"");
+					}
+					std::get<1>(company_and_address[0]) = boost::trim_copy(std::get<1>(company_and_address[0]));
 
-					if (boost::iequals(company_and_address[0], L"SAID TO CONTAIN"))
-						return std::vector<std::wstring>();
+					if (boost::iequals(std::get<1>(company_and_address[0]), L"SAID TO CONTAIN"))
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
 				}
 
-				if (field == L"AGENT") {
+				if (company_and_address.size() > 0 && boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^POSCO CENTER", boost::regex::icase))) {
+					company_and_address.insert(company_and_address.begin(), std::make_pair(to_rect(company_and_address[0]), L"POSCO"));
+				}
+
+				if (field == L"AGENT" && company_and_address.size() > 0) {
 					company_and_address.resize(1);
+					if (boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^AIR ?& ?SEA ?GMBH", boost::regex::icase))) {
+						company_and_address.clear();
+					}
+				}
+				else if ((field == L"SHIPPER" || field == L"SELLER") && company_and_address.size() > 0) {
+					if (boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^QTY|PAYMENT|AGREEMENT|FREIGHT|PURCHASE|TERMS OF", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L" IMT.K ", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^INDUSTRIES", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"DEKVILLD", boost::regex::icase))) {
+						company_and_address.clear();
+					}
+				}
+				else if (field == L"EXPORTER" && category == L"CERTIFICATE OF ORIGIN" && company_and_address.size() > 0) {
+					if (boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"TELEPHONE", boost::regex::icase))) {
+						company_and_address.erase(company_and_address.begin());
+					}
+				}
+				else if (field == L"MANUFACTURER" && category == L"COMMERCIAL INVOICE" && company_and_address.size() > 0) {
+					if (boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"RAW", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"HONGKONG:", boost::regex::icase))) {
+						company_and_address.clear();
+					}
+				}
+				else if (field == L"EXPORTER" && company_and_address.size() > 0) {
+					const auto company = boost::trim_copy(boost::regex_replace(std::get<1>(company_and_address[0]), boost::wregex(L"[^A-Z0-9]", boost::regex::icase), L""));
+					if (company == L"ORIGINAL")
+						company_and_address.clear();
+				}
+				else if (field == L"NOTIFY" && company_and_address.size() > 0) {
+					if (boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"FREIGHT COL", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"AS DELIVERY", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"SEE CLAU", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^NOTIFY", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^CLAUAA", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^SAME VS", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"APPLICANT:", boost::regex::icase))
+						|| boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^FROM:", boost::regex::icase))) {
+						company_and_address.clear();
+					}
+				}
+				else if (field == L"CONSIGNEE" && company_and_address.size() > 0) {
+					const auto company = boost::trim_copy(boost::regex_replace(std::get<1>(company_and_address[0]), boost::wregex(L"[^A-Z0-9]", boost::regex::icase), L""));
+					if (boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^BANK KOREA ", boost::regex::icase))) {
+						company_and_address.clear();
+					}
+				}
+
+				if (company_and_address.size() > 0) {
+					if (boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"COUNTRY\\)")))
+						company_and_address.erase(company_and_address.begin());
+					if (boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"[SF]AME (?:AS)? (?:ABOVE|BELOW|CONSIGNEE)")) ||
+						boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"\\(CAT \\d\\)|WISHES TO |GOODS SAID|OTHERWISE |CLEARLY INDICATED|UNIT PRICE|SHALL BE |NEGOTIATED AT")) ||
+						boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"(?:REF|STYLE) N[O0][ .:]|INVOICE ?|^CURRENCY$|(?:FROM|ADDRESS): ?|ACCOUNT OF|S/#|^REF$|(?:REGISTERED OFFICE|DATE) :|(?:TEL|FAX)[ :]\\s*\\d|^\\d+$|\\(A\\) INSURANCE")) ||
+						boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^MEASUREMENT")) ||
+						boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^GROSS WEIGHT")) ||
+						boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^MARKS I")) ||
+						boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^TRADE TERMS")) ||
+						boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^(PACKING LIST|COMMERCIAL INVOICE)")) ||
+						boost::regex_search(std::get<1>(company_and_address[0]), boost::wregex(L"^AS PER CONTRACT"))) {
+						company_and_address.clear();
+					}
 				}
 
 				return company_and_address;
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_issuing_bank(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
-				std::vector<std::wstring> bank_lines;
+				std::vector<std::pair<cv::Rect, std::wstring>> bank_lines;
 				if (fields.find(L"ISSUING BANK") == fields.end())
 					return bank_lines;
 
@@ -14329,25 +20085,28 @@ namespace selvy {
 				auto bank = extract_field_values(new_field, blocks,
 					std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 					std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-					configuration, L"companies"),
+						configuration, L"companies"),
 					default_extract,
 					postprocess_uppercase);
+
 				if (bank.empty()) {
 					bank = extract_field_values(new_field, blocks,
 						search_self,
 						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-						configuration, L"companies"),
+							configuration, L"companies"),
 						default_extract,
 						postprocess_uppercase);
 				}
+
 				if (bank.empty()) {
 					bank = extract_field_values(new_field, blocks,
 						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 3, false, false, false),
 						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-						configuration, L"companies"),
+							configuration, L"companies"),
 						default_extract,
 						postprocess_uppercase);
 				}
+
 				if (bank.empty()) {
 					bank = extract_field_values(new_field, blocks,
 						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, true, false, false),
@@ -14376,18 +20135,18 @@ namespace selvy {
 							auto bank_name = extract_field_values(new_field, blocks,
 								search_self,
 								std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-								configuration, L"companies"),
+									configuration, L"companies"),
 								default_extract,
 								postprocess_uppercase);
 							if (!bank_name.empty() && is_close) {
-								bank_lines.emplace_back(to_wstring(bank_name));
+								bank_lines.emplace_back(std::make_pair(to_rect(bank_name), to_wstring(bank_name)));
 								include_company = true;
 							}
 						}
 
 						if (is_close) {
 							for (const auto& line : bank) {
-								bank_lines.emplace_back(postprocess_uppercase(to_wstring(line)));
+								bank_lines.emplace_back(std::make_pair(to_rect(line), postprocess_uppercase(to_wstring(line))));
 								if (find_company(line, configuration, L"companies"))
 									break;
 							}
@@ -14395,11 +20154,11 @@ namespace selvy {
 					}
 				}
 				else {
-					bank_lines.emplace_back(postprocess_uppercase(to_wstring(bank[0])));
+					bank_lines.emplace_back(std::make_pair(to_rect(bank[0]), postprocess_uppercase(to_wstring(bank[0]))));
 					if (!find_company(bank[0], configuration, L"companies")) {
 						const auto address_blocks = find_nearest_down_lines(to_block(bank[0]), blocks, 0.5, 0.0, 10, true);
 						for (const auto& address_block : address_blocks) {
-							bank_lines.emplace_back(postprocess_uppercase(to_wstring(address_block)));
+							bank_lines.emplace_back(std::make_pair(to_rect(address_block), postprocess_uppercase(to_wstring(address_block))));
 							if (find_company(address_block, configuration, L"companies"))
 								break;
 						}
@@ -14409,14 +20168,74 @@ namespace selvy {
 				return bank_lines;
 			}
 
-			static std::unordered_map<std::wstring, std::vector<std::wstring>>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_swift_bank(const configuration& configuration, const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				const auto paper = image_size;
+				std::vector<line> upper_lines;
+				std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(upper_lines), [&](const line& line) {
+					const auto line_rect = to_rect(line);
+					return paper.height / 4 > line_rect.y;
+				});
+
+				auto bank = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					std::make_tuple(cv::Rect(), L"", cv::Range())
+				}, std::vector<block> {upper_lines},
+						default_search,
+						default_preprocess,
+						create_extract_function(L"(?:SWIFT\\s*(?:CODE|ADDR(?:ESS)?|ID|BIC IS|BIC)?\\s*[/:;'\"]?\\s*)([[:alnum:]]+)"), postprocess_uppercase);
+
+				if (bank.empty()) {
+					std::vector<line> bottom_lines;
+					std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(bottom_lines), [&](const line& line) {
+						const auto line_rect = to_rect(line);
+						return paper.height / 4 * 3 < line_rect.y;
+					});
+					bank = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, std::vector<block> {bottom_lines},
+							default_search,
+							default_preprocess,
+							create_extract_function(L"(?:SWIFT\\s*(?:CODE|ADDR(?:ESS)?|ID|BIC IS|BIC)?\\s*[/:;'\"]?\\s*)([[:alnum:]]+)"), postprocess_uppercase);
+				}
+				if (!bank.empty()) {
+					auto swift = to_wstring(bank);
+					if (swift.size() != 8 && swift.size() != 11)
+						bank.clear();
+				}
+
+				if (bank.empty()) {
+					line swift_keyword_line;
+					for (auto& line : upper_lines) {
+						auto str = to_wstring(line);
+						if (boost::regex_search(str, boost::wregex(L"^SWIFT", boost::regex::icase))) {
+							swift_keyword_line = line;
+							break;
+						}
+					}
+					auto new_keyword = std::make_tuple(to_rect(swift_keyword_line), to_wstring(swift_keyword_line), cv::Range(0, swift_keyword_line.size()));
+					bank = find_nearest_right_line(new_keyword, std::vector<block> {upper_lines}, 0.25, 0.0, 100, false);
+				}
+
+				if (!bank.empty()) {
+					const auto swift = to_wstring(bank[0]);
+					const auto name = create_postprocess_function(configuration, L"swift-bank.csv")(swift);
+
+					if (!name.empty())
+						return std::vector<std::pair<cv::Rect, std::wstring>>{ std::make_pair(to_rect(bank[0]), swift), std::make_pair(to_rect(bank[0]), name)};
+				}
+
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
+			}
+
+			static std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>
 				extract_banks(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (category == L"BILL OF EXCHANGE") {
 					if (fields.find(L"BANK") == fields.end())
-						return std::unordered_map<std::wstring, std::vector<std::wstring>>();
+						return std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>();
 
 					auto banks = extract_field_values(fields.at(L"BANK"), blocks,
 						search_self,
@@ -14425,66 +20244,173 @@ namespace selvy {
 						postprocess_uppercase);
 					if (banks.empty())
 						banks = extract_field_values(fields.at(L"BANK"), blocks,
-						std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
-						default_preprocess,
-						create_extract_function(L"(?:PAY TO )?(?:THE ORDER OF )?(?:(.*BANK.*(?:BRANCH)?)(?:\\s+(?:(?:OF|OR) ORDER\\s+)|(.*BANK.*(?:BRANCH)?))"),
-						postprocess_uppercase);
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							default_preprocess,
+							create_extract_function(L"(?:PAY TO )?(?:THE ORDER OF )?(?:(.*BANK.*(?:BRANCH)?)(?:\\s+(?:(?:OF|OR) ORDER)\\s+)|(.*BANK.*(?:BRANCH)?))"),
+							postprocess_uppercase);
 					if (banks.empty())
-						return std::unordered_map<std::wstring, std::vector<std::wstring>>();
+						return std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>();
 
-					const auto bank_name = boost::regex_replace(to_wstring(banks[0]), boost::wregex(L".*(?:PAY TO|ORDER OF|(?:OF|OR) ORDER)\\s+", boost::regex_constants::icase), L"");
-					return std::unordered_map<std::wstring, std::vector<std::wstring>>{
-						std::make_pair(L"NEGOTIATION BANK", std::vector<std::wstring>{bank_name})
+					auto bank_name = boost::regex_replace(to_wstring(banks[0]), boost::wregex(L".*(?:PAY TO|ORDER OF|(?:OF|OR) ORDER)\\s+", boost::regex_constants::icase), L"");
+					bank_name = boost::regex_replace(bank_name, boost::wregex(L"^OF ", boost::regex::icase), L"");
+					bank_name = boost::regex_replace(bank_name, boost::wregex(L"^: ?", boost::regex::icase), L"");
+					bank_name = boost::regex_replace(bank_name, boost::wregex(L"^THE ORDER THE SUM OF", boost::regex::icase), L"");
+					bank_name = boost::regex_replace(bank_name, boost::wregex(L"^PAY TO THE ORDER OF:?", boost::regex::icase), L"");
+					bank_name = boost::regex_replace(bank_name, boost::wregex(L"^THE SUM OF", boost::regex::icase), L"");
+
+					return std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>{
+						std::make_pair(L"NEGOTIATION BANK", std::vector<std::pair<cv::Rect, std::wstring>>{std::make_pair(to_rect(banks[0]), bank_name)})
 					};
 				}
 				else if (category == L"LETTER OF CREDIT") {
-					std::unordered_map<std::wstring, std::vector<std::wstring>> banks;
-					auto bank = extract_bank_and_address(configuration, category, L"SWIFT ISSUING BANK", L"SWIFT COLLECTING BANK", fields,
-						blocks);
-					if (!bank.empty())
-						banks.emplace(std::make_pair(L"ISSUING BANK", bank));
-					if (fields.find(L"SWIFT COLLECTING BANK") != fields.end()) {
-						std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> new_fields;
-						for (auto& field : fields.at(L"SWIFT COLLECTING BANK")) {
-							auto str = to_wstring(field);
-							if (!boost::regex_search(str, boost::wregex(L"전자서명", boost::regex::icase))) {
-								std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+					std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>> banks;
+					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> new_bank_fields;
+					if (fields.find(L"BANK FROM") != fields.end() && fields.find(L"BANK TO") != fields.end()
+						&& !fields.at(L"BANK FROM").empty() && !fields.at(L"BANK TO").empty()) {
+						bool is_bank_from = false;
+						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+						for (auto& field : fields.at(L"BANK FROM")) {
+							auto paper = image_size;
+							auto rect = to_rect(field);
+							auto basis_range = std::get<2>(field);
+							if (basis_range.start > 2) {
+								continue;
+							}
+							if (rect.y < paper.height / 5 && rect.x < paper.width / 15) {
 								new_field.emplace_back(field);
-								new_fields.insert(std::make_pair(L"SWIFT COLLECTING BANK", new_field));
+								is_bank_from = true;
 								break;
 							}
 						}
-						for (auto& field : fields.at(L"ETC INFO")) {
-							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+						for (auto& field : fields.at(L"SWIFT ISSUING BANK")) {
 							new_field.emplace_back(field);
-							new_fields.insert(std::make_pair(L"ETC INFO", new_field));
 						}
-						bank = extract_bank_and_address(configuration, category, L"SWIFT COLLECTING BANK", L"ETC INFO", new_fields, blocks);
+						if (!new_field.empty())
+							new_bank_fields.insert(std::make_pair(L"SWIFT ISSUING BANK", new_field));
+						new_field.clear();
+						if (is_bank_from) {
+							for (auto& field : fields.at(L"BANK TO")) {
+								auto paper = image_size;
+								auto rect = to_rect(field);
+								auto basis_range = std::get<2>(field);
+								if (basis_range.start > 2) {
+									continue;
+								}
+								if (rect.y < paper.height / 4 && rect.x < paper.width / 15) {
+									new_field.emplace_back(field);
+									break;
+								}
+							}
+							for (auto& field : fields.at(L"SWIFT COLLECTING BANK")) {
+								new_field.emplace_back(field);
+							}
+							if (!new_field.empty())
+								new_bank_fields.insert(std::make_pair(L"SWIFT COLLECTING BANK", new_field));
+							new_field.clear();
+						}
+
+						if (new_bank_fields.find(L"SWIFT COLLECTING BANK") != new_bank_fields.end()) {
+							auto collecting_rect = to_rect(new_bank_fields.at(L"SWIFT COLLECTING BANK")[0]);
+							for (auto& field : fields.at(L"FROMTO BELOW")) {
+								auto rect = to_rect(field);
+								auto basis_range = std::get<2>(field);
+								if (basis_range.start > 2) {
+									continue;
+								}
+								if (rect.y > collecting_rect.y && rect.y < collecting_rect.br().y + collecting_rect.height * 5) {
+									new_field.emplace_back(field);
+									break;
+								}
+							}
+							if (!new_field.empty())
+								new_bank_fields.insert(std::make_pair(L"ETC INFO", new_field));
+						}
+						if (new_bank_fields.size() < 2) {
+							new_bank_fields = fields;
+						}
+
+					}
+					else {
+						new_bank_fields = fields;
+					}
+					auto bank = extract_bank_and_address(configuration, category, L"SWIFT ISSUING BANK", L"SWIFT COLLECTING BANK", new_bank_fields,
+						blocks);
+
+					if (!bank.empty())
+						banks.emplace(std::make_pair(L"ISSUING BANK", bank));
+
+					if (new_bank_fields.find(L"SWIFT COLLECTING BANK") != new_bank_fields.end()) {
+						for (auto i = 0; i < new_bank_fields.at(L"SWIFT COLLECTING BANK").size(); i++) {
+							auto& field = new_bank_fields.at(L"SWIFT COLLECTING BANK")[i];
+							auto str = to_wstring(field, false, true);
+							if (boost::regex_search(str, boost::wregex(L"전자서명", boost::regex::icase))) {
+								new_bank_fields.at(L"SWIFT COLLECTING BANK").erase(new_bank_fields.at(L"SWIFT COLLECTING BANK").begin() + i);
+								break;
+							}
+						}
+
+						bank = extract_bank_and_address(configuration, category, L"SWIFT COLLECTING BANK", L"ETC INFO", new_bank_fields, blocks);
+
 					}
 
 					if (!bank.empty())
 						banks.emplace(std::make_pair(L"COLLECTING BANK", bank));
 					if (fields.find(L"ISSUING BANK") != fields.end()) {
 						std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> new_fields;
+						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
 						for (auto& field : fields.at(L"ISSUING BANK")) {
-							auto str = to_wstring(field);
-							if (!boost::regex_search(str, boost::wregex(L"BY AUTHENTICATED", boost::regex::icase))) {
-								std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+							auto str = to_wstring(field, false, true);
+							if (!boost::regex_search(str, boost::wregex(L"BY AUTHENTICATED", boost::regex::icase))
+								&& !boost::regex_search(str, boost::wregex(L"ENTITLED", boost::regex::icase))
+								&& !boost::regex_search(str, boost::wregex(L"NOMINATED", boost::regex::icase))
+								&& !boost::regex_search(str, boost::wregex(L"DISCREPANCY", boost::regex::icase))
+								&& !boost::regex_search(str, boost::wregex(L"FEE OF", boost::regex::icase))
+								&& !boost::regex_search(str, boost::wregex(L"EQUIVALENT", boost::regex::icase))
+								&& !boost::regex_search(str, boost::wregex(L"MARK FREIGHT", boost::regex::icase))) {
 								new_field.emplace_back(field);
-								new_fields.insert(std::make_pair(L"ISSUING BANK", new_field));
 								break;
 							}
 						}
+						if (!new_field.empty())
+							new_fields.insert(std::make_pair(L"ISSUING BANK", new_field));
+						new_field.clear();
+						for (auto& field : fields.at(L"APPLICANT")) {
+							new_field.emplace_back(field);
+						}
+						if (!new_field.empty())
+							new_fields.insert(std::make_pair(L"APPLICANT", new_field));
 						bank = extract_bank_and_address(configuration, category, L"ISSUING BANK", L"APPLICANT", new_fields, blocks);
 					}
 
 					if (!bank.empty())
 						banks.emplace(std::make_pair(L"ISSUING BANK", bank));
 
+					if (fields.find(L"REIMBURSING BANK") != fields.end()) {
+						std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> new_fields;
+						for (auto& field : fields.at(L"REIMBURSING BANK")) {
+							auto str = to_wstring(field, false, true);
+							auto basis_range = std::get<2>(field);
+							if (basis_range.start > 5) {
+								continue;
+							}
+							if (boost::regex_search(str, boost::wregex(L"ONLY if", boost::regex::icase))
+								|| boost::regex_search(str, boost::wregex(L"DOCUMENTS", boost::regex::icase))) {
+								continue;
+							}
+							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+							new_field.emplace_back(field);
+							new_fields.insert(std::make_pair(L"REIMBURSING BANK", new_field));
+						}
+						bank = extract_bank_and_address(configuration, category, L"REIMBURSING BANK", L"REIMBURSING BANK", new_fields, blocks);
+					}
+
+					if (!bank.empty())
+						banks.emplace(std::make_pair(L"REIMBURSING BANK", bank));
+
 					return banks;
 				}
 				else if (category == L"SHIPMENT ADVICE") {
-					std::unordered_map<std::wstring, std::vector<std::wstring>> banks;
+					std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>> banks;
 					auto bank = extract_company_and_address(configuration, category, L"ISSUING BANK", fields, blocks);
 					if (!bank.empty())
 						banks.emplace(std::make_pair(L"ISSUING BANK", bank));
@@ -14492,7 +20418,7 @@ namespace selvy {
 					return banks;
 				}
 				else if (category == L"FIRM OFFER") {
-					std::unordered_map<std::wstring, std::vector<std::wstring>> banks;
+					std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>> banks;
 					auto bank = extract_company_and_address(configuration, category, L"COLLECTING BANK", fields, blocks);
 					if (!bank.empty())
 						banks.emplace(std::make_pair(L"COLLECTING BANK", bank));
@@ -14500,37 +20426,87 @@ namespace selvy {
 					return banks;
 				}
 
-				return std::unordered_map<std::wstring, std::vector<std::wstring>>();
+				return std::unordered_map<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>();
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_applicant(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (category == L"LETTER OF CREDIT")
 					return extract_company_and_address(configuration, category, L"APPLICANT", L"BENEFICIARY", fields, blocks);
-				if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST" || category == L"SHIPMENT ADVICE" || category == L"FIRM OFFER")
-					return extract_company_and_address(configuration, category, L"APPLICANT", fields, blocks);
-				return std::vector<std::wstring>();
+				if (category == L"SHIPMENT ADVICE" || category == L"FIRM OFFER") {
+					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> new_fields;
+					for (auto& field : fields.at(L"APPLICANT")) {
+						auto basis_range = std::get<2>(field);
+						if (basis_range.start > 5) {
+							continue;
+						}
+						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+						new_field.emplace_back(field);
+						new_fields.insert(std::make_pair(L"APPLICANT", new_field));
+					}
+					return extract_company_and_address(configuration, category, L"APPLICANT", new_fields, blocks);
+				}
+				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST") {
+					auto paper = image_size;
+					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> new_fields;
+					for (auto& field : fields.at(L"APPLICANT")) {
+						auto rect = to_rect(field);
+						auto str = to_wstring(field, false, true);
+						if (boost::regex_search(str, boost::wregex(L"vat reg", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"credit num", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"irc no", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"tin no", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"number", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"ruc.", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"TO THE ORDER OF", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"bin no", boost::regex::icase))) {
+							continue;
+						}
+						if (rect.y < paper.height * 2 / 5) {
+							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+							new_field.emplace_back(field);
+							new_fields.insert(std::make_pair(L"APPLICANT", new_field));
+							break;
+						}
+					}
+					return extract_company_and_address(configuration, category, L"APPLICANT", new_fields, blocks);
+				}
+
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_beneficiary(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (category == L"LETTER OF CREDIT")
 					return extract_company_and_address(configuration, category, L"BENEFICIARY", L"AMOUNT", fields, blocks);
-				if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST" || category == L"SHIPMENT ADVICE")
+				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST")
 					return extract_company_and_address(configuration, category, L"BENEFICIARY", fields, blocks);
-				return std::vector<std::wstring>();
+				else if (category == L"SHIPMENT ADVICE") {
+					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> new_fields;
+					for (auto& field : fields.at(L"BENEFICIARY")) {
+						auto basis_range = std::get<2>(field);
+						if (basis_range.start > 5) {
+							continue;
+						}
+						std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+						new_field.emplace_back(field);
+						new_fields.insert(std::make_pair(L"BENEFICIARY", new_field));
+					}
+					return extract_company_and_address(configuration, category, L"BENEFICIARY", new_fields, blocks);
+				}
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_shipping_line(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (category == L"SHIPMENT ADVICE") {
 					return extract_company(configuration, category, L"SHIPPING LINE", fields, blocks);
@@ -14539,43 +20515,79 @@ namespace selvy {
 					const auto paper = image_size;
 
 					if (blocks.empty())
-						return std::vector<std::wstring>();
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 					std::vector<line> right_lines;
 					std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(right_lines), [&](const line& line) {
 						const auto line_rect = to_rect(line);
-						return paper.width / 2 < line_rect.x && paper.height / 4 > line_rect.y;
+						return paper.width / 2 < line_rect.x && paper.height / 4 > line_rect.y && line_rect.height > 17;
 					});
 
 					auto companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 						std::make_tuple(cv::Rect(), L"", cv::Range())
 					}, std::vector<block> {right_lines},
-					default_search,
-					std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-					configuration, L"companies"),
-					default_extract,
-					postprocess_uppercase);
+							default_search,
+							std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+								configuration, L"companies"),
+							default_extract,
+							postprocess_uppercase);
+
+					if (companies.size() == 1 && to_wstring(companies[0]) == L"SDN BHD") {
+						companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+							std::make_tuple(cv::Rect(), L"", cv::Range())
+						}, std::vector<block> {right_lines},
+								default_search,
+								default_preprocess,
+								create_extract_function(L"(CJ KOREA EXPRESS .*)"),
+								postprocess_uppercase);
+
+						if (!companies.empty() && to_wstring(companies[0]).find(L"SDN BHD") == std::wstring::npos) {
+							std::get<1>(companies[0]) += L" SDN BHD";
+						}
+					}
+
+					if (std::any_of(std::begin(companies), std::end(companies), [](const std::pair<cv::Rect, std::wstring>& company) {
+						const auto str = to_wstring(company);
+						if (boost::regex_search(str, boost::wregex(L"(?:OMITTING|ABOVE|NOTATION|DEFINITION) ", boost::regex_constants::icase)))
+							return true;
+						return false;
+					}))
+						companies.clear();
 
 					boost::remove_erase_if(companies, [](const std::pair<cv::Rect, std::wstring>& company) {
 						const auto company_name = to_wstring(company);
 						return company_name.find(L"BILL OF") != std::wstring::npos;
 					});
+					auto company = to_wstring(companies);
+					if (company == L"INTERNATIONAL") {
+						companies.clear();
+					}
 
 					if (companies.empty()) {
+						int min_height = INT_MAX;
+						for (auto& field : fields) {
+							auto ff = std::get<1>(field);
+							for (auto& f : ff) {
+								auto rect = to_rect(f);
+								if (min_height > rect.y) {
+									min_height = rect.y;
+								}
+							}
+						}
 						std::vector<line> left_lines;
 						std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(left_lines), [&](const line& line) {
 							const auto line_rect = to_rect(line);
-							return paper.width / 2 > line_rect.x && paper.height * 0.07 > line_rect.y;
+							return (paper.width / 2 > line_rect.x && paper.height * 0.05 > line_rect.y) && min_height > line_rect.y;
 						});
 
 						companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 							std::make_tuple(cv::Rect(), L"", cv::Range())
 						}, std::vector<block> {left_lines},
-						default_search,
-						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
-						configuration, L"companies"),
-						default_extract,
-						postprocess_uppercase);
+								default_search,
+								std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+									configuration, L"companies"),
+								default_extract,
+								postprocess_uppercase);
 
 						boost::remove_erase_if(companies, [](const std::pair<cv::Rect, std::wstring>& company) {
 							const auto company_name = to_wstring(company);
@@ -14584,72 +20596,381 @@ namespace selvy {
 					}
 
 					if (companies.empty())
-						return std::vector<std::wstring>();
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 					const auto shipping_line = std::max_element(std::begin(companies), std::end(companies),
 						[](const std::pair<cv::Rect, std::wstring>& a,
-						const std::pair<cv::Rect, std::wstring>& b) {
+							const std::pair<cv::Rect, std::wstring>& b) {
 						return to_rect(a).height < to_rect(b).height;
 					});
 
-					const auto shipping_line_name = to_wstring(*shipping_line);
-					return std::vector<std::wstring>{shipping_line_name};
+					auto shipping_line_name = to_wstring(*shipping_line);
+					std::vector<std::wstring> words;
+					boost::algorithm::split(words, shipping_line_name, boost::is_any_of(L"#"), boost::token_compress_on);
+					if (words.size() > 1)
+						shipping_line_name = words.back();
+					shipping_line_name = boost::regex_replace(shipping_line_name, boost::wregex(L"([^\\s]+) \\1", boost::regex_constants::icase), L"$1");
+					shipping_line_name = boost::regex_replace(shipping_line_name, boost::wregex(L"\\(?FORMERLY KNOWN AS ", boost::regex::icase), L"");
+					if (!boost::regex_search(shipping_line_name, boost::wregex(L"CJ GLS HONG KONG", boost::regex::icase)))
+						shipping_line_name = boost::regex_replace(shipping_line_name, boost::wregex(L"CJ GLS ", boost::regex::icase), L"CJ KOREA EXPRESS ");
+					shipping_line_name = boost::regex_replace(shipping_line_name, boost::wregex(L"CARRIER ", boost::regex::icase), L"");
+					shipping_line_name = boost::regex_replace(shipping_line_name, boost::wregex(L"6\\) HAIYANG", boost::regex::icase), L"HAIYANG");
+
+					if (shipping_line_name.size() < 5 || shipping_line_name.size() > 50)
+						shipping_line_name.clear();
+
+					if (boost::regex_search(shipping_line_name, boost::wregex(L"^LIMITED", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"^LINES", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"^NWSHFFL", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"JBLK MERCHANT", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"^L0JTE CHEMKAL", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"OEAN CONTAINER LINE", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"^OCEAN CONTAINER LINE", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"^LOTTE CHEMICAL", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"^EXPRESS LINE", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"^WWW.", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"^IIHULIEESOFBRF GMBH", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"^WBWSISTICS.LTD", boost::regex_constants::icase))
+						|| boost::regex_search(shipping_line_name, boost::wregex(L"\\s+STEEL\\s+", boost::regex_constants::icase))) {
+						shipping_line_name.clear();
+					}
+
+
+					return std::vector<std::pair<cv::Rect, std::wstring>>{ std::make_pair(to_rect(*shipping_line), shipping_line_name)};
 				}
 
-				return std::vector<std::wstring>();
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_seller(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
+				if (fields.at(L"SELLER").size() > 0) {
+					const auto paper = image_size;
+					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> up_side_field;
+					for (auto& field : fields.at(L"SELLER")) {
+						auto rect = to_rect(field);
+						auto basis_range = std::get<2>(field);
+						auto str = to_wstring(field, true);
+						if (basis_range.start > 5) {
+							continue;
+						}
+						if (boost::regex_search(str, boost::wregex(L"date", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"after", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"before", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"declared", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"reference", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"number", boost::regex::icase))
+							|| boost::regex_search(str, boost::wregex(L"by", boost::regex::icase))) {
+							continue;
+						}
+						if (rect.y < paper.height * 2 / 5) {
+							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+							new_field.emplace_back(field);
+							up_side_field.insert(std::make_pair(L"SELLER", new_field));
+							break;
+						}
+					}
+					if (up_side_field.find(L"SELLER") == up_side_field.end())
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+					return extract_company_and_address(configuration, category, L"SELLER", up_side_field, blocks);
+				}
+				return extract_company_and_address(configuration, category, L"SELLER", fields, blocks);
+			}
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_lc_number(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(L"L/C NO") == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> lc_number;
+
 				if (category == L"COMMERCIAL INVOICE") {
-					std::vector<std::wstring> extracted_result;
+					lc_number = extract_field_values(fields.at(L"L/C NO"), blocks,
+						search_self,
+						preprocess_lc_number,
+						default_extract,
+						std::bind(trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
 
-					std::vector<std::pair<cv::Rect, std::wstring>> result;
+					if (lc_number.empty()) {
+						lc_number = extract_field_values(fields.at(L"L/C NO"), blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+							preprocess_lc_number,
+							default_extract,
+							std::bind(trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
+						//std::bind(&selvy::ocr::trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
+					}
+					if (lc_number.empty())
+						lc_number = extract_field_values(fields.at(L"L/C NO"), blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 5.0, 8, false),
+							preprocess_lc_number,
+							default_extract,
+							std::bind(trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
+				}
 
-					result = extract_field_values(fields.at(L"SELLER"), blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
-						//std::bind(&trade_document_recognizer::preprocess_port_of_discharge, std::placeholders::_1, configuration, L"PORT OF DISCHARGE"),
-						//default_preprocess,
+
+				return lc_number;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_license_number(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> found;
+				//categoty == ""
+				if (true) {
+					found = extract_field_values(fields.at(field_name), blocks,
+						search_self,
 						default_preprocess,
 						default_extract,
-						postprocess_discharge);
+						std::bind(trade_document_recognizer::postprocess_license_number, std::placeholders::_1, configuration));
 
-					if (result.empty()) {
-						result = extract_field_values(fields.at(L"SELLER"), blocks,
-							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+					if (found.empty()) {
+						found = extract_field_values(fields.at(field_name), blocks,
+							std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
 							default_preprocess,
 							default_extract,
-							postprocess_discharge);
-						//					return extracted_result;
-					}
-					else if (to_wstring(result[0]).length() > 50) {
-						return extracted_result;
-					}
-					else {
-						//for (auto& a : result) {
-						extracted_result.emplace_back(to_wstring(result[0]));
-						//}
+							std::bind(trade_document_recognizer::postprocess_license_number, std::placeholders::_1, configuration));
+						//std::bind(&selvy::ocr::trade_document_recognizer::postprocess_lc_number, std::placeholders::_1, configuration));
+						//postprecess_license_number 수정필요
 					}
 
-					if (result.empty()) {
-						return extracted_result;
-					}
-
-					return extracted_result;
 				}
-				
+
+
+				if (found.empty())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
 			}
 
-			static std::vector<std::wstring>
+			//tyler
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_currency_sign(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> currency_sign;
+
+				if (category == L"COMMERCIAL INVOICE") {
+					currency_sign = extract_field_values(fields.at(field_name), blocks,
+						search_self,
+						default_preprocess,
+						default_extract,
+						std::bind(trade_document_recognizer::postprocess_currency_sign, std::placeholders::_1, configuration));
+
+					if (currency_sign.empty())
+						currency_sign = extract_field_values(fields.at(field_name), blocks,
+							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 1, 100, true),
+							default_preprocess,
+							default_extract,
+							std::bind(trade_document_recognizer::postprocess_currency_sign, std::placeholders::_1, configuration));
+
+					if (currency_sign.empty())
+						currency_sign = extract_field_values(fields.at(field_name), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							default_preprocess,
+							default_extract,
+							std::bind(trade_document_recognizer::postprocess_currency_sign, std::placeholders::_1, configuration));
+					if (currency_sign.empty()) {
+						currency_sign = extract_field_values(fields.at(L"AMOUNTTWO"), blocks,
+							search_self,
+							default_preprocess,
+							default_extract,
+							std::bind(trade_document_recognizer::postprocess_currency_sign, std::placeholders::_1, configuration));
+					}
+					if (currency_sign.empty())
+						currency_sign = extract_field_values(fields.at(L"AMOUNTTWO"), blocks,
+							std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 1, 100, true),
+							default_preprocess,
+							default_extract,
+							std::bind(trade_document_recognizer::postprocess_currency_sign, std::placeholders::_1, configuration));
+
+					if (currency_sign.empty())
+						currency_sign = extract_field_values(fields.at(L"AMOUNTTWO"), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							default_preprocess,
+							default_extract,
+							std::bind(trade_document_recognizer::postprocess_currency_sign, std::placeholders::_1, configuration));
+				}
+
+
+				if (currency_sign.size() > 0)
+					currency_sign.erase(currency_sign.begin() + 1, currency_sign.end());
+				return currency_sign;
+			}
+
+			//find total line
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_amount(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> total;
+
+				if (category == L"COMMERCIAL INVOICE") {
+					/*total = extract_field_values(fields.at(field_name), blocks,
+					search_self,
+					preprocess_amount,
+					default_extract,
+					std::bind(trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));*/
+
+					//total = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					//	std::make_tuple(cv::Rect(), L"", cv::Range())
+					//}, blocks,
+					//	default_search,//search_self_all
+					//		default_preprocess,
+					//		create_extract_function(L"(.*[,\./][0-9]{3}\.[0-9]{2})"),
+					//		default_postprocess);
+
+					if (total.empty()) {
+						total = extract_field_values(fields.at(field_name), blocks,
+							std::bind(find_far_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							default_preprocess,
+							default_extract,
+							std::bind(trade_document_recognizer::postprocess_digit_for_ci, std::placeholders::_1, configuration));
+					}
+					/*if(total.empty())
+					total = extract_field_values(fields.at(field_name), blocks,
+					std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.8, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					default_postprocess);*/
+				}
+				else if (category == L"LETTER OF CREDIT") {
+
+					total = extract_field_values(fields.at(field_name), blocks,
+						search_self,
+						preprocess_amount,
+						default_extract,
+						default_postprocess);
+
+					if (total.empty() || to_wstring(total[0]).length() < 5) {
+						total = extract_field_values(fields.at(field_name), blocks,
+							std::bind(find_right_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+							preprocess_amount,
+							default_extract,
+							default_postprocess);
+
+					}
+
+					if (total.empty() || to_wstring(total[0]).length() < 5) {
+						total = extract_field_values(fields.at(field_name), blocks,
+							std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false, false, false),
+							preprocess_amount,
+							default_extract,
+							default_postprocess);
+
+					}
+					if (!total.empty())
+						total.erase(total.begin() + 1, total.end());
+
+					return total;
+				}
+
+
+				if (total.empty())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				return total;
+			}
+
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_amount_for_ci(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, std::wstring field_name)
+			{
+				if (fields.find(field_name) == fields.end())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				std::vector<std::pair<cv::Rect, std::wstring>> total;
+
+				/*total = extract_field_values(fields.at(field_name), blocks,
+				search_self,
+				preprocess_amount,
+				default_extract,
+				std::bind(trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));*/
+
+				//total = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+				//	std::make_tuple(cv::Rect(), L"", cv::Range())
+				//}, blocks,
+				//	default_search,//search_self_all
+				//		default_preprocess,
+				//		create_extract_function(L"(.*[,\./][0-9]{3}\.[0-9]{2})"),
+				//		default_postprocess);
+
+
+				total = extract_field_values(fields.at(field_name), blocks,
+					std::bind(find_far_right_line, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+					default_preprocess,
+					default_extract,
+					std::bind(trade_document_recognizer::postprocess_digit_for_ci, std::placeholders::_1, configuration));
+
+				if (total.empty()) {
+					total = extract_field_values(fields.at(field_name), blocks,
+						search_self,
+						default_preprocess,
+						default_extract,
+						std::bind(trade_document_recognizer::postprocess_amount, std::placeholders::_1, configuration));
+				}
+
+				if (total.empty())
+				{
+					total = extract_field_values(fields.at(L"AMOUNTTWO"), blocks,
+						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 100, false),
+						default_preprocess,
+						default_extract,
+						std::bind(trade_document_recognizer::postprocess_digit_for_ci, std::placeholders::_1, configuration));
+				}
+				if (!total.empty())
+				{
+					if (total.size() > 0) {
+						std::sort(std::begin(total), std::end(total),
+							[](const std::pair<cv::Rect, std::wstring>& a, const std::pair<cv::Rect, std::wstring>& b) {
+							return a.first.y > b.first.y;
+						});
+					}
+				}
+				if (!total.empty())
+				{
+					total.erase(total.begin() + 1, total.end());
+				}
+				/*if(total.empty())
+				total = extract_field_values(fields.at(field_name), blocks,
+				std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.8, 0.0, 100, false),
+				default_preprocess,
+				default_extract,
+				default_postprocess);*/
+
+				if (total.empty())
+					return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+				return total;
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_buyer(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST") {
-					std::vector<std::wstring> company_and_addresses;
+					std::vector<std::pair<cv::Rect, std::wstring>> company_and_addresses;
 
 					if (fields.at(L"BUYER").size() > 0) {
 						const auto paper = image_size;
@@ -14669,7 +20990,12 @@ namespace selvy {
 							for (auto& field : fields.at(L"BUYER")) {
 								auto rect = to_rect(field);
 								auto str = to_wstring(field, true);
-								if (boost::regex_search(str, boost::wregex(L"order no", boost::regex::icase))) {
+								auto basis_range = std::get<2>(field);
+								if (basis_range.start > 5) {
+									continue;
+								}
+								if (boost::regex_search(str, boost::wregex(L"order no", boost::regex::icase))
+									|| boost::regex_search(str, boost::wregex(L"warehouse", boost::regex::icase))) {
 									continue;
 								}
 								if (rect.y < paper.height * 2 / 5) {
@@ -14683,8 +21009,7 @@ namespace selvy {
 
 
 						if (up_side_field.find(L"BUYER") == up_side_field.end())
-							return std::vector<std::wstring>();
-
+							return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 						company_and_addresses = extract_company_and_address(configuration, category, L"BUYER", up_side_field, blocks);
 					}
@@ -14693,15 +21018,16 @@ namespace selvy {
 						company_and_addresses = extract_company_and_address(configuration, category, L"BUYER", fields, blocks);
 
 					if (!company_and_addresses.empty()) {
-						if (std::any_of(std::begin(company_and_addresses), std::end(company_and_addresses), [](const std::wstring& address) {
-							if (address.find(L"ITEM") == 0)
+						if (std::any_of(std::begin(company_and_addresses), std::end(company_and_addresses), [](const std::pair<cv::Rect, std::wstring>& address) {
+							if (std::get<1>(address).find(L"ITEM") == 0 ||
+								std::get<1>(address).find(L"GROUP#") == 0)
 								return true;
 							return false;
 						}))
-							return std::vector<std::wstring>();
+							return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 						if (company_and_addresses.size() > 4) {
-							company_and_addresses[3] += L" " + company_and_addresses[4];
+							std::get<1>(company_and_addresses[3]) += L" " + std::get<1>(company_and_addresses[4]);
 							company_and_addresses.erase(company_and_addresses.begin() + 4);
 						}
 
@@ -14712,39 +21038,50 @@ namespace selvy {
 					return extract_company_and_address(configuration, category, L"BUYER", fields, blocks);
 				}
 
-				return std::vector<std::wstring>();
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_importer(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (category == L"CERTIFICATE OF ORIGIN")
 					return extract_company_and_address(configuration, category, L"IMPORTER", fields, blocks);
 				else if (category == L"COMMERCIAL INVOICE" || category == L"PACKING LIST")
 					return extract_company_and_address(configuration, category, L"IMPORTER", fields, blocks);
-				return std::vector<std::wstring>();
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
 			}
 
-			static std::vector<std::wstring>
+			static std::vector<std::pair<cv::Rect, std::wstring>>
 				extract_drawer(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				if (category == L"REMITTANCE LETTER") {
 					return extract_company_and_address(configuration, category, L"DRAWER", fields, blocks);
 				}
 
-				return std::vector<std::wstring>();
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
 			}
 
-			static std::vector<std::wstring>
-				extract_exporter(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_drawee(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
+				if (category == L"REMITTANCE LETTER") {
+					return extract_company_and_address(configuration, category, L"DRAWEE", fields, blocks);
+				}
 
+				return std::vector<std::pair<cv::Rect, std::wstring>>();
+			}
+
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_exporter(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
 				if (fields.at(L"EXPORTER").size() > 0) {
 					const auto paper = image_size;
 					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> up_side_field;
@@ -14758,84 +21095,291 @@ namespace selvy {
 						}
 					}
 					if (up_side_field.find(L"EXPORTER") == up_side_field.end())
-						return std::vector<std::wstring>();
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
 
 					return extract_company_and_address(configuration, category, L"EXPORTER", up_side_field, blocks);
 				}
 				return extract_company_and_address(configuration, category, L"EXPORTER", fields, blocks);
 			}
 
-			static std::wstring
-				extract_exporter_ex(const configuration& configuration, const std::wstring& category,
+			static std::vector<std::pair<cv::Rect, std::wstring>>
+				extract_manufacturer(const configuration& configuration, const std::wstring& category,
 					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
 					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
-				if (fields.find(L"EXPORTER") == fields.end())
-					return L"";
-				//spdlog::get("recognizer")->info("{} : {} : [{}],[{}]", __FUNCTION__, __LINE__, fields.at(L"L/C NO"), blocks);
-
-				std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> filtered_fields;
-				std::copy_if(std::begin(fields.at(L"EXPORTER")), std::end(fields.at(L"EXPORTER")), std::back_inserter(filtered_fields), [](const std::tuple<cv::Rect, std::wstring, cv::Range>& field) {
-					const auto text = std::get<1>(field);
-					if (boost::regex_search(text, boost::wregex(L"^to|^from", boost::regex::icase)))
-						return true;
-					if (boost::regex_search(text, boost::wregex(L"\\s+to:", boost::regex::icase)))
-						return false;
-					return true;
-				});
-
-
-				std::vector<std::pair<cv::Rect, std::wstring>> ret;
-
-				ret = extract_field_values(fields.at(L"EXPORTER"), blocks,
-					std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.01, 0.25, 2, false, false, false),
-					default_preprocess,
-					default_extract,
-					default_postprocess);
-
-				if (ret.empty()) {
-					ret = extract_field_values(filtered_fields, blocks,
-						std::bind(find_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 8, true),
-						default_preprocess,
-						default_extract,
-						default_postprocess);
-
-					if (ret.empty()) {
-						ret = extract_field_values(filtered_fields, blocks,
-							search_self,
-							default_preprocess,
-							default_extract,
-							default_postprocess);
+				if (fields.at(L"MANUFACTURER").size() > 0) {
+					const auto paper = image_size;
+					std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>> up_side_field;
+					for (auto& field : fields.at(L"MANUFACTURER")) {
+						auto rect = to_rect(field);
+						auto basis_range = std::get<2>(field);
+						if (basis_range.start > 5) {
+							continue;
+						}
+						if (rect.y < paper.height * 2 / 5) {
+							std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>> new_field;
+							new_field.emplace_back(field);
+							up_side_field.insert(std::make_pair(L"MANUFACTURER", new_field));
+							break;
+						}
 					}
+					if (up_side_field.find(L"MANUFACTURER") == up_side_field.end())
+						return std::vector<std::pair<cv::Rect, std::wstring>>();
+
+					return extract_company_and_address(configuration, category, L"MANUFACTURER", up_side_field, blocks);
 				}
-				/*
-				boost::remove_erase_if(lcno, [](const std::pair<cv::Rect, std::wstring>& vessel) {
-				return boost::regex_search(std::get<1>(vessel), boost::wregex(L"TO BE (?:DECLARED|ADVISED)", boost::regex_constants::icase)); });
-				*/
-				if (ret.empty())
-					return L"";
-
-				return std::get<1>(ret[0]);
-			}
-
-
-			static std::vector<std::wstring>
-				extract_manufacturer(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
-			{
 				return extract_company_and_address(configuration, category, L"MANUFACTURER", fields, blocks);
 			}
 
-			static std::wstring
-				extract_carrier(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+			static std::pair<cv::Rect, std::wstring>
+				extract_airwaybill_carrier(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				const auto keywords = get_dictionary_words(configuration, dictionaries_, L"registered_airlines");
+				const auto dictionary = build_spell_dictionary(configuration, L"registered_airlines");
+				aho_corasick::wtrie trie;
+				build_trie(trie, keywords);
+
+				auto text = to_wstring(blocks);
+				const auto matches = trie.parse_text(text);
+
+				if (matches.empty())
+					return std::make_pair(cv::Rect(), L"");
+
+				const auto match = matches.back();
+
+				auto airline = boost::replace_all_copy(std::wstring(text.begin() + match.get_start(), text.begin() + match.get_end() + 1), L"\n", L" ");
+
+				return std::make_pair(cv::Rect(), postprocess_uppercase(airline));
+			}
+
+			static std::pair<cv::Rect, std::wstring>
+				extract_carrier(const configuration& configuration,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				const auto paper = image_size;
 
 				if (blocks.empty())
-					return L"";
+					return std::make_pair(cv::Rect(), std::wstring());
+
+				std::vector<line> left_upper_lines;
+				std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(left_upper_lines), [&](const line& line) {
+					const auto line_rect = to_rect(line);
+					return paper.width * 0.3 > line_rect.x && line_rect.y < 100;
+				});
+				if (!left_upper_lines.empty())
+					left_upper_lines.resize(1);
+
+				auto companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					std::make_tuple(cv::Rect(), L"", cv::Range())
+				}, std::vector<block> {left_upper_lines},
+						default_search,
+						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+							configuration, L"companies"),
+						default_extract,
+						postprocess_uppercase);
+
+				if (!companies.empty()) {
+					auto str = to_wstring(companies[0]);
+					if (str.find(L"CARRIER") == std::wstring::npos)
+						companies.clear();
+				}
+
+				std::vector<line> right_upper_lines;
+				std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(right_upper_lines), [&](const line& line) {
+					const auto line_rect = to_rect(line);
+					return paper.width * 0.5 < line_rect.x && line_rect.y < 300;
+				});
+
+				companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					std::make_tuple(cv::Rect(), L"", cv::Range())
+				}, std::vector<block> {right_upper_lines},
+						default_search,
+						std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+							configuration, L"companies"),
+						default_extract,
+						postprocess_uppercase);
+
+				if (!companies.empty()) {
+					auto str = to_wstring(companies[0]);
+					if (str.find(L"CARRIER") == std::wstring::npos)
+						companies.clear();
+				}
+
+				std::vector<line> right_lines;
+				std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(right_lines), [&](const line& line) {
+					const auto line_rect = to_rect(line);
+					return paper.width * 0.45 < line_rect.x && paper.height / 4 * 3 < line_rect.y;
+				});
+
+				if (companies.empty()) {
+					companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, std::vector<block> {right_lines},
+							default_search,
+							std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+								configuration, L"companies"),
+							default_extract,
+							postprocess_uppercase);
+				}
+
+				if (companies.size() == 1 && to_wstring(companies[0]) == L"SDN BHD") {
+					companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, std::vector<block> {right_lines},
+							default_search,
+							default_preprocess,
+							create_extract_function(L"(CJ KOREA EXPRESS .*)"),
+							postprocess_uppercase);
+
+					if (!companies.empty() && to_wstring(companies[0]).find(L"SDN BHD") == std::wstring::npos) {
+						std::get<1>(companies[0]) += L" SDN BHD";
+					}
+				}
+
+				auto carrier_keywords = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+					std::make_tuple(cv::Rect(), L"", cv::Range())
+				}, std::vector<block> {right_lines},
+						default_search,
+						default_preprocess,
+						create_extract_function(L"(AS A CARRIER|CARRIER)"),
+						postprocess_uppercase);
+
+				boost::remove_erase_if(companies, [](const std::pair<cv::Rect, std::wstring>& company) {
+					const auto company_name = to_wstring(company);
+					return company_name.find(L"BILL OF") != std::wstring::npos || company_name.size() < 5;
+				});
+
+				if (companies.empty()) {
+					right_lines.clear();
+					std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(right_lines), [&](const line& line) {
+						const auto line_rect = to_rect(line);
+						return paper.width * 0.45 < line_rect.x && paper.height * 0.67 < line_rect.y;
+					});
+
+					companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, std::vector<block> {right_lines},
+							default_search,
+							std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1,
+								configuration, L"companies"),
+							default_extract,
+							postprocess_uppercase);
+				}
+
+				if (companies.empty())
+					return std::make_pair(cv::Rect(), L"");
+
+				cv::Rect carrier_rect;
+				std::wstring carrier_name;
+
+				if (carrier_name.empty()) {
+					for (const auto& company : companies) {
+						auto str = to_wstring(company);
+						if (boost::regex_search(str, boost::wregex(L"FOR[ .]THE[ .]CARRIER", boost::regex::icase)) ||
+							boost::regex_search(str, boost::wregex(L"O[FL][ .]THE[ .]CARRIER", boost::regex::icase)) ||
+							boost::regex_search(str, boost::wregex(L"BY[ .]THE[ .]CARRIER", boost::regex::icase)) ||
+							boost::regex_search(str, boost::wregex(L"AGENT [FT]OR", boost::regex::icase)))
+							carrier_name = to_wstring(company);
+						carrier_rect = to_rect(company);
+					}
+				}
+
+				if (carrier_name.empty() && !carrier_keywords.empty()) {
+					for (auto& key : carrier_keywords) {
+						auto key_rect = to_rect(key);
+						for (const auto& company : companies) {
+							if (to_wstring(company).find(L"CARRIERS LIABILITY") != std::wstring::npos)
+								continue;
+
+							auto rect = to_rect(company);
+							if (key_rect.br().y < rect.y && rect.y - key_rect.br().y < key_rect.height * 2) {
+								carrier_name = to_wstring(company);
+								carrier_rect = to_rect(company);
+							}
+						}
+						if (!carrier_name.empty())
+							break;
+					}
+				}
+				if (carrier_name.empty()) {
+					for (const auto& company : companies) {
+						if (to_wstring(company).find(L"LINE A/S") != std::wstring::npos ||
+							to_wstring(company).find(L"LINE") != std::wstring::npos ||
+							to_wstring(company).find(L"OCEAN A/S") != std::wstring::npos ||
+							to_wstring(company).find(L"FORWARDING") != std::wstring::npos) {
+							carrier_name = to_wstring(company);
+							carrier_rect = to_rect(company);
+						}
+					}
+				}
+
+				if (carrier_name.empty()) {
+					const auto carrier = std::max_element(std::begin(companies), std::end(companies),
+						[](const std::pair<cv::Rect, std::wstring>& a,
+							const std::pair<cv::Rect, std::wstring>& b) {
+						return to_rect(a).height < to_rect(b).height;
+					});
+
+					carrier_name = to_wstring(*carrier);
+					carrier_rect = to_rect(*carrier);
+				}
+
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L".* AS AGENT$", boost::regex::icase), L"");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"^AS AGENT ?", boost::regex::icase), L"");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"^AS GABBIER,?", boost::regex::icase), L"");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"^FOR THE[ .](?:CARRIER|EARNER)", boost::regex::icase), L"");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"AND THE VESSEL PROVIDER ?", boost::regex::icase), L"");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"(?:.* (?:(?:F[OA]R|OF) THE (?:CARRIER|CARDER|GAMER|[EG]ARNER)|BEHALF OF)-? ?|\\s*(?:BY|ONBOARD|FOR|ISSUED|SIGNED)\\s|\\s*AS CARRIER[.,]?)", boost::regex::icase), L"");
+				if (!boost::regex_search(carrier_name, boost::wregex(L"EUKOR CAR", boost::regex::icase)))
+					carrier_name = boost::regex_replace(carrier_name, boost::wregex(L".* CARRIER", boost::regex::icase), L"");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"^E AGENT TOR ", boost::regex::icase), L"");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"\\(?FORMERLY KNOWN AS ", boost::regex::icase), L"");
+				if (!boost::regex_search(carrier_name, boost::wregex(L"CJ GLS HONG KONG", boost::regex::icase)))
+					carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"CJ GLS ", boost::regex::icase), L"CJ KOREA EXPRESS ");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"^EAS INTERNATIONAL$", boost::regex::icase), L"EAS INTERNATIONAL SHIPPING COMPANY LIMITED");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"^CARRIER ", boost::regex::icase), L"");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"^JAGAI TRANS LINE", boost::regex::icase), L"NAGAI TRANS LINE");
+				carrier_name = boost::regex_replace(carrier_name, boost::wregex(L"^NAGA1 FRANS LINE", boost::regex::icase), L"NAGAI TRANS LINE");
+
+				carrier_name = boost::trim_copy(carrier_name);
+
+				if (carrier_name == L"CO.,LTD." || carrier_name == L"P LTD." || carrier_name == L"BV" || carrier_name == L"LIMITED" || carrier_name == L"O.LTD." || carrier_name == L"LTD"
+					|| carrier_name == L"(CHINA) CO.,LTD." || carrier_name == L"LTD." || carrier_name == L"INC."
+					|| boost::regex_search(carrier_name, boost::wregex(L"GOODS AS", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"^RENTED", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"^OGISTICS CO.", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"^RLNE CO", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"^AOTHORIZVD BV", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"MAERSK AGENCY", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"RECEIVED THE", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"ABOVE PARTICULARS AS", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"IT REQUIRED,", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"^ND IHI COOL-ECL", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"RECEIVE DELIVERY", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"^CO.,", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"^ROERI-", boost::regex::icase))
+					|| boost::regex_search(carrier_name, boost::wregex(L"^SET OFF\\.", boost::regex::icase))) {
+					carrier_name.clear();
+					carrier_rect = cv::Rect();
+				}
+
+				return std::make_pair(carrier_rect, carrier_name);
+			}
+
+			static std::pair<cv::Rect, std::wstring>
+				extract_carrier_2(const configuration& configuration, const std::wstring& category,
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
+			{
+				const auto paper = image_size;
+
+				if (blocks.empty())
+					return std::pair<cv::Rect, std::wstring>();
+				std::pair<cv::Rect, std::wstring> res;
+				std::vector<std::pair<cv::Rect, std::wstring>> result;
 
 				std::vector<line> right_lines;
 				std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(right_lines), [&](const line& line) {
@@ -14845,7 +21389,7 @@ namespace selvy {
 
 				auto companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 					std::make_tuple(cv::Rect(), L"", cv::Range())
-				}, std::vector<block> {right_lines}, default_search, std::bind(&trade_document_recognizer::preprocess_company, std::placeholders::_1, configuration, L"companies"), default_extract, postprocess_uppercase);
+				}, std::vector<block> {right_lines}, default_search, std::bind(&trade_document_recognizer::preprocess_company_2, std::placeholders::_1, configuration, L"companies"), default_extract, postprocess_uppercase);
 
 				boost::remove_erase_if(companies, [](const std::pair<cv::Rect, std::wstring>& company) {
 					const auto company_name = to_wstring(company);
@@ -14853,54 +21397,75 @@ namespace selvy {
 				});
 
 				if (companies.empty())
-					return L"";
+					return std::pair<cv::Rect, std::wstring>();
 
 				std::wstring carrier_name;
 				for (const auto& company : companies) {
 					if (to_wstring(company).find(L"LINE A/S") != std::wstring::npos ||
 						to_wstring(company).find(L"LINE") != std::wstring::npos)
+					{
 						carrier_name = to_wstring(company);
+						res = std::make_pair(company.first, company.second);
+					}
 				}
 
 				if (carrier_name.empty()) {
 					const auto carrier = std::max_element(std::begin(companies), std::end(companies),
 						[](const std::pair<cv::Rect, std::wstring>& a,
-						const std::pair<cv::Rect, std::wstring>& b) {
+							const std::pair<cv::Rect, std::wstring>& b) {
 						return to_rect(a).height < to_rect(b).height;
 					});
 
 					carrier_name = to_wstring(*carrier);
+					res = std::make_pair(companies.back().first, companies.back().second);
 				}
 				std::wstring strBuf = boost::regex_replace(carrier_name, boost::wregex(L"ETE.- TL"), L"ETERNITY INTL");
 				strBuf = boost::regex_replace(strBuf, boost::wregex(L"HAFLINES"), L"HAI LINES");
 				strBuf = boost::regex_replace(strBuf, boost::wregex(L"LLOVP"), L"LLOVD");
+				strBuf = boost::regex_replace(strBuf, boost::wregex(L"W00W0N"), L"WOOWON");
 				//strBuf = boost::regex_replace(strBuf, boost::wregex(L"EJJ IYCO"), L"EXPRESS INTL CO");
 				strBuf = boost::regex_replace(strBuf, boost::wregex(L"(?:.* (?:(?:FOR|OF) THE (?:CARRIER|GAMER)|BEHALF OF) |\\s*(?:BY|ONBOARD|FOR|ISSUED|SIGNED)\\s|\\s*AS CARRIER[.,]?)"), L"");
+				/*
+				if (result.empty()) {
+					result = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+						std::make_tuple(cv::Rect(), L"", cv::Range())
+					}, blocks,
+						default_search,
+							preprocess_shipment_date,
+							create_extract_function(L"(.*)(LTD)|(.*)(INC)"),
+							default_postprocess);
+				}
 
-				return boost::trim_copy(strBuf);
+				if (result.empty()) {
+					return std::make_pair(res.first, strBuf);
+				}
+				else {
+					return std::make_pair(res.first, to_wstring(result[0]));
+				}
+				*/
+				return std::make_pair(res.first, strBuf);
 			}
 
 			static std::wstring
 				extract_place_of_issue(const configuration& configuration, const std::wstring& category,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size)
 			{
-				if (fields.find(category) == fields.end())
-					return L"";
 				if (blocks.empty())
 					return L"";
-
+				if (fields.find(L"PLACE OF ISSUE") == fields.end())
+					return L"";
 				auto country = extract_field_values(fields.at(L"PLACE OF ISSUE"), blocks,
 					std::bind(find_nearest_right_line, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false),
 					std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-					configuration, L"countries"),
+						configuration, L"countries"),
 					default_extract,
 					postprocess_uppercase);
 				if (country.empty()) {
 					country = extract_field_values(fields.at(L"PLACE OF ISSUE"), blocks,
 						search_self,
 						std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-						configuration, L"countries"),
+							configuration, L"countries"),
 						default_extract,
 						postprocess_uppercase);
 				}
@@ -14908,30 +21473,29 @@ namespace selvy {
 					country = extract_field_values(fields.at(L"PLACE OF ISSUE"), blocks,
 						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.25, 0.0, 100, false, false, false),
 						std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-						configuration, L"countries"),
+							configuration, L"countries"),
 						default_extract,
 						postprocess_uppercase);
 				}
 
-				if (country.empty()) {
-					const auto paper = image_size;
+				/*if (country.empty()) {
+				const auto paper = image_size;
 
-					std::vector<line> bottom_lines;
-					std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(bottom_lines), [&](const line& line) {
-						const auto line_rect = to_rect(line);
-						return line_rect.y > paper.height * 3 / 4 && line.size() < 5;
-					});
+				std::vector<line> bottom_lines;
+				std::copy_if(std::begin(blocks[0]), std::end(blocks[0]), std::back_inserter(bottom_lines), [&](const line& line) {
+				const auto line_rect = to_rect(line);
+				return line_rect.y > paper.height * 3 / 4 && line.size() < 5;
+				});
 
-					country = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
-						std::make_tuple(cv::Rect(), L"", cv::Range())
-					}, std::vector<block> {bottom_lines},
-					default_search,
-					std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
-					configuration, L"countries"),
-					default_extract,
-					postprocess_uppercase);
-
-				}
+				country = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
+				std::make_tuple(cv::Rect(), L"", cv::Range())
+				}, std::vector<block> {bottom_lines},
+				default_search,
+				std::bind(&trade_document_recognizer::preprocess_country, std::placeholders::_1,
+				configuration, L"countries"),
+				default_extract,
+				postprocess_uppercase);
+				}*/
 
 				if (country.empty())
 					return L"";
@@ -14939,13 +21503,13 @@ namespace selvy {
 				return to_wstring(country[0]);
 			}
 
-			static std::pair<std::wstring, std::wstring>
+			static std::tuple<cv::Rect, std::wstring, std::wstring>
 				extract_insurance_company(const configuration& configuration,
-				const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
-				const std::vector<block>& blocks, const cv::Size& image_size, const std::wstring& keyword)
+					const std::unordered_map<std::wstring, std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>>& fields,
+					const std::vector<block>& blocks, const cv::Size& image_size, const std::wstring& keyword)
 			{
 				if (fields.find(keyword) == fields.end())
-					return std::make_pair(L"", L"");
+					return std::make_tuple(cv::Rect(), L"", L"");
 
 				std::wstring search_field = keyword;
 
@@ -14958,17 +21522,17 @@ namespace selvy {
 						postprocess_uppercase);
 
 					if (!insurance_company.empty())
-						return std::make_pair(std::get<1>(insurance_company[0]), L"");
+						return std::make_tuple(std::get<0>(insurance_company[0]), std::get<1>(insurance_company[0]), L"");
 
 					insurance_company = extract_field_values(fields.at(search_field), blocks,
-						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.5, 0.0, 1, false, false, false),
+						std::bind(find_nearest_down_lines, std::placeholders::_1, std::placeholders::_2, 0.4, 0.0, 1, false, false, false),
 						std::bind(&trade_document_recognizer::preprocess_insurance_company, std::placeholders::_1, configuration, L"insurance_companies"),
 						default_extract,
 						postprocess_uppercase);
 
 					if (!insurance_company.empty()) {
 						const auto country_code = extract_country_code(configuration, insurance_company[0], blocks, image_size);
-						return std::make_pair(std::get<1>(insurance_company[0]), country_code);
+						return std::make_tuple(std::get<0>(insurance_company[0]), std::get<1>(insurance_company[0]), country_code);
 					}
 
 					insurance_company = extract_field_values(fields.at(search_field), blocks,
@@ -14978,13 +21542,13 @@ namespace selvy {
 						postprocess_uppercase);
 
 					if (!insurance_company.empty())
-						return std::make_pair(std::get<1>(insurance_company[0]), L"");
+						return std::make_tuple(std::get<0>(insurance_company[0]), std::get<1>(insurance_company[0]), L"");
 				}
 
-				return std::make_pair(L"", L"");
+				return std::make_tuple(cv::Rect(), L"", L"");
 			}
 
-			static std::wstring
+			static std::pair<cv::Rect, std::wstring>
 				extract_insurance_company(const configuration& configuration, const std::vector<block>& blocks, const cv::Size& image_size)
 			{
 				const auto paper = image_size;
@@ -14998,14 +21562,14 @@ namespace selvy {
 				auto companies = extract_field_values(std::vector<std::tuple<cv::Rect, std::wstring, cv::Range>>{
 					std::make_tuple(cv::Rect(), L"", cv::Range())
 				}, std::vector<block> { upper_lines },
-				default_search,
-				std::bind(&trade_document_recognizer::preprocess_insurance_company, std::placeholders::_1,
-				configuration, L"insurance_companies"),
-				default_extract,
-				postprocess_uppercase);
+						default_search,
+						std::bind(&trade_document_recognizer::preprocess_insurance_company, std::placeholders::_1,
+							configuration, L"insurance_companies"),
+						default_extract,
+						postprocess_uppercase);
 
 				if (companies.empty())
-					return L"";
+					return std::make_pair(cv::Rect(), L"");
 
 				boost::remove_erase_if(companies, [](const std::pair<cv::Rect, std::wstring>& company) {
 					const static std::vector<std::wstring> COMPANY_KEYWORDS{ L"INSURANCE", L"AIG", L"IAG", L"MARSH", L"SOLUTION", L"RISK", L"ADJUSTERS" };
@@ -15018,15 +21582,31 @@ namespace selvy {
 				});
 
 				if (companies.empty())
-					return L"";
+					return std::make_pair(cv::Rect(), L"");
 
 				const auto insurance_company = std::max_element(std::begin(companies), std::end(companies),
 					[](const std::pair<cv::Rect, std::wstring>& a,
-					const std::pair<cv::Rect, std::wstring>& b) {
+						const std::pair<cv::Rect, std::wstring>& b) {
 					return to_rect(a).y > to_rect(b).y;
 				});
 
-				return to_wstring(*insurance_company);
+				auto company = to_wstring(*insurance_company);
+
+				if (boost::regex_search(company, boost::wregex(L"^E INSURANCE", boost::regex_constants::icase))) {
+					return std::make_pair(cv::Rect(), L"");
+				}
+
+				if (company == L"KB INSURANCE") {
+					company = L"KB INSURANCE CO LTD";
+				}
+				else if (company == L"HANWHA GENERAL INSURANCE") {
+					company = L"HANWHA GENERAL INSURANCE CO LTD";
+				}
+				else if (company == L"LOTTE INSURANCE") {
+					company = L"LOTTE INSURANCE CO LTD";
+				}
+
+				return std::make_pair(to_rect(*insurance_company), company);
 			}
 
 			static std::wstring extract_country_code(const configuration& configuration, const std::pair<cv::Rect, std::wstring>& basis, const std::vector<block>& blocks, const cv::Size& image_size)
@@ -15096,35 +21676,47 @@ namespace selvy {
 				text = boost::regex_replace(text, boost::wregex(L"SOUTH (KOREA)N?", boost::regex::icase), L"$1");
 				text = boost::regex_replace(text, boost::wregex(L"(?:SEA|AIR) ?PORT", boost::regex::icase), L"PORT");
 				text = boost::regex_replace(text, boost::wregex(L"PORT IN", boost::regex::icase), L"PORT");
+				text = boost::regex_replace(text, boost::wregex(L"VIET NAM", boost::regex::icase), L"VIETNAM");
 				text = boost::trim_copy(text);
 
 				std::vector<std::wstring> words;
 				boost::algorithm::split(words, text, boost::is_any_of(L"., "), boost::token_compress_on);
 
 				bool is_singapore = false;
+				bool is_djibouti = false;
 
 				if (words.size() > 1) {
 					const auto dictionary = build_spell_dictionary(configuration, category);
-					for (auto i = 0; i < words.size(); i++) {
+					for (auto i = 1; i < words.size(); i++) {
+						if (words[i] == L"GUDANG")
+							continue;
+
 						const auto suggested = dictionary->Correct(words[i]);
 
-						if (!suggested.empty() && suggested[0].distance <= 1) {
+						if (!suggested.empty() && suggested[0].distance <= get_distance_threshold(words[i])) {
 							if (suggested[0].term == L"singapore")
 								is_singapore = true;
+							if (suggested[0].term == L"djibouti")
+								is_djibouti = true;
 							words.resize(i);
 							break;
 						}
 					}
 
 					boost::remove_erase_if(words, [](const std::wstring& word) {
-						return word == L"PORT" || word.empty();
+						return word == L"PORT" || word.empty() || word == L"JOHOR";
 					});
 
 					text = boost::algorithm::join(words, L"");
+
+					if (text.size() > 32)
+						text = L"";
 				}
 
 				if (is_singapore)
 					return std::make_pair(std::get<0>(a), L"SINGAPORE");
+				if (is_djibouti)
+					return std::make_pair(std::get<0>(a), L"DJIBOUTI");
 
 				return std::make_pair(std::get<0>(a), text);
 			}
@@ -15148,7 +21740,7 @@ namespace selvy {
 
 				if (words.size() > 1) {
 					const auto dictionary = build_spell_dictionary(configuration, category);
-					for (auto i = 0; i < words.size(); i++) {
+					for (auto i = 1; i < words.size(); i++) {
 						const auto suggested = dictionary->Correct(words[i]);
 
 						if (!suggested.empty() && suggested[0].distance <= 1) {
@@ -15210,11 +21802,23 @@ namespace selvy {
 			static std::pair<cv::Rect, std::wstring>
 				preprocess_vessel_name(const std::pair<cv::Rect, std::wstring>& a)
 			{
+				auto text = std::get<1>(a);
+				text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
+				text = boost::regex_replace(text, boost::wregex(L"L1NE"), L"LINE");
+				text = boost::regex_replace(text, boost::wregex(L"/?FLIGHT to:?", boost::regex_constants::icase), L"");
+
+				return std::make_pair(std::get<0>(a), text);
+			}
+
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_vessel_name_2(const std::pair<cv::Rect, std::wstring>& a)
+			{
 				auto text = boost::to_upper_copy(std::get<1>(a));
 
 				text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
 				text = boost::regex_replace(text, boost::wregex(L"L1NE"), L"LINE");
 				text = boost::regex_replace(text, boost::wregex(L"VI11"), L"VIII");
+				text = boost::regex_replace(text, boost::wregex(L"V[-#]{1}"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(HEUN6)"), L"HEUNG");
 				text = boost::regex_replace(text, boost::wregex(L"(NAGDYA)"), L"NAGOYA");
 				text = boost::regex_replace(text, boost::wregex(L"(CL54W|DI'4W)"), L"054W");
@@ -15222,8 +21826,9 @@ namespace selvy {
 				text = boost::regex_replace(text, boost::wregex(L"(CHAI I FNGF)"), L"CHALLENGE");
 				text = boost::regex_replace(text, boost::wregex(L"(1906S|1907E|1913E|0150S)(.*)"), L"$1");
 				text = boost::regex_replace(text, boost::wregex(L"(HEE 309)(.*)"), L"HEE 309");
-				
+
 				//text = boost::regex_replace(text, boost::wregex(L"/?FLIGHT to:?", boost::regex::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(5019)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(OTHER)(.*)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(CARRIER)(.*)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(IO THE)(.*)"), L"");
@@ -15233,15 +21838,98 @@ namespace selvy {
 				text = boost::regex_replace(text, boost::wregex(L"(OTHER)(.*)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(BDH)(.*)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(PALEMBANG)(.*)"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"(917|022)W(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(DARNIN)(.*)"), L"DARWIN");
+				text = boost::regex_replace(text, boost::wregex(L"([0-9]{3,5}[E|N|S|W|5]{1})(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"([0-9]{2}[E|N|S|W]{1})(.*)"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"V[ .#-]{1}[0-9]{3,5}(.*)"), L"");
-				
+
 
 				return std::make_pair(std::get<0>(a), text);
 			}
 
 			static std::pair<cv::Rect, std::wstring>
 				preprocess_company(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category)
+			{
+				auto text = std::get<1>(a);
+				text = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z0-9&\\., ()/\\n-]"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(\\s)\\s+"), L"$1");
+				text = boost::regex_replace(text, boost::wregex(L"\\s*([\\.,])\\s*"), L"$1");
+				text = boost::regex_replace(text, boost::wregex(L"\\s+(\\S)\\s+"), L"$1 ");
+				text = boost::regex_replace(text, boost::wregex(L"(?:^.*\\s+TO|^TO)\\s+", boost::regex::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(llc|ltd|corp|inc)$", boost::regex::icase), L"$1.");
+				text = boost::regex_replace(text, boost::wregex(L"LTD.CARRIER", boost::regex::icase), L"LTD.");
+				text = boost::regex_replace(text, boost::wregex(L"AS CARRIER", boost::regex::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"COLTD.?$", boost::regex::icase), L"CO.,LTD.");
+				text = boost::regex_replace(text, boost::wregex(L"LG CHA\\(LTD\\.", boost::regex::icase), L"LG CHEM,LTD.");
+				text = boost::regex_replace(text, boost::wregex(L"LG (?:OHEM|CHBJ),\\s*LTD\\.", boost::regex::icase), L"LG CHEM,LTD.");
+				text = boost::regex_replace(text, boost::wregex(L"CORFFOJRATION", boost::regex::icase), L"CORPORATION");
+				text = boost::regex_replace(text, boost::wregex(L"UANSOLL TEXTILE", boost::regex::icase), L"HANSOLL TEXTILE");
+				text = boost::regex_replace(text, boost::wregex(L"GLOVIS as", boost::regex::icase), L"GLOVIS AASS");
+
+
+				text = boost::trim_copy(text);
+
+				std::vector<std::wstring> words;
+				boost::algorithm::split(words, text, boost::is_any_of(L" "), boost::token_compress_on);
+
+				const auto keywords = get_dictionary_words(configuration, dictionaries_, category);
+				const auto dictionary = build_spell_dictionary(configuration, category);
+				aho_corasick::wtrie trie;
+				build_trie(trie, keywords);
+
+				if (words.size() > 1) {
+					auto& last_word = words.back();
+					if (last_word.find(L'\n') == std::wstring::npos) {
+						const auto suggested = dictionary->Correct(last_word);
+
+						if (!suggested.empty() && suggested[0].distance <= get_distance_threshold(last_word))
+							last_word = suggested[0].term;
+					}
+					else {
+						std::vector<std::wstring> cleaned_words;
+						boost::algorithm::split(cleaned_words, last_word, boost::is_any_of(L"\n"));
+
+						for (auto& word : cleaned_words) {
+							const auto suggested = dictionary->Correct(word);
+							if (!suggested.empty() && suggested[0].distance <= 1)
+								word = suggested[0].term;
+						}
+
+						last_word = boost::algorithm::join(cleaned_words, L"\n");
+					}
+
+					text = boost::algorithm::join(words, L" ");
+				}
+
+				const auto matches = trie.parse_text(text);
+
+				if (matches.empty())
+					return std::make_pair(std::get<0>(a), L"");
+
+				const auto match = matches.back();
+
+				if (boost::regex_search(text, boost::wregex(L"^pt\\.", boost::regex_constants::icase)) ||
+					boost::regex_search(text, boost::wregex(L"^cv\\.", boost::regex_constants::icase))) {
+					return std::make_pair(std::get<0>(a),
+						boost::replace_all_copy(std::wstring(text.begin() + match.get_start(), text.end()), L"\n",
+							L" "));
+				}
+
+				if (match.get_end() + 1 == text.size() ||
+					text[match.get_end() + 1] == L'.' ||
+					text[match.get_end() + 1] == L',' ||
+					text[match.get_end() + 1] == L'\n' ||
+					text[match.get_end() + 1] == L' ' ||
+					text[match.get_end() + 1] == L'(')
+					return std::make_pair(std::get<0>(a),
+						boost::replace_all_copy(std::wstring(text.begin(), text.begin() + match.get_end() + 1), L"\n",
+							L" "));
+
+				return std::make_pair(std::get<0>(a), L"");
+			}
+
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_company_2(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category)
 			{
 				auto text = std::get<1>(a);
 				text = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z0-9&\\., ()/\\n-]"), L"");
@@ -15295,7 +21983,7 @@ namespace selvy {
 				if (boost::regex_search(text, boost::wregex(L"^pt\\.", boost::regex_constants::icase))) {
 					return std::make_pair(std::get<0>(a),
 						boost::replace_all_copy(std::wstring(text.begin() + match.get_start(), text.end()), L"\n",
-						L""));
+							L""));
 				}
 
 				if (match.get_end() + 1 == text.size() ||
@@ -15304,8 +21992,8 @@ namespace selvy {
 					text[match.get_end() + 1] == L'\n' ||
 					text[match.get_end() + 1] == L' ')
 					return std::make_pair(std::get<0>(a),
-					boost::replace_all_copy(std::wstring(text.begin(), text.begin() + match.get_end() + 1), L"\n",
-					L" "));
+						boost::replace_all_copy(std::wstring(text.begin(), text.begin() + match.get_end() + 1), L"\n",
+							L" "));
 
 				return std::make_pair(std::get<0>(a), L"");
 			}
@@ -15314,17 +22002,25 @@ namespace selvy {
 				preprocess_insurance_company(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category)
 			{
 				auto text = std::get<1>(a);
-				text = boost::regex_replace(text, boost::wregex(L"[^\\(\\)a-zA-Z0-9&\\., \\n-]"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"[^\\(\\)a-zA-Z0-9&\\., \\n+-]"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(\\s)\\s+"), L"$1");
 				text = boost::regex_replace(text, boost::wregex(L"\\s*([\\.,])\\s*"), L"$1");
-				text = boost::regex_replace(text, boost::wregex(L"\\s+(\\S)\\s+"), L"$1");
+				text = boost::regex_replace(text, boost::wregex(L"\\s+(\\S)\\s+"), L"$1 ");
 				text = boost::regex_replace(text, boost::wregex(L"1"), L"I");
 				text = boost::regex_replace(text, boost::wregex(L"\\s?\\&\\s?|\\sS\\s"), L" \\& ");
-				text = boost::regex_replace(text, boost::wregex(L"(COMPANT|COMPEM)[\\.,]?$", boost::regex::icase), L"company");
-				text = boost::regex_replace(text, boost::wregex(L"hanuuha", boost::regex::icase), L"hanwha");
+				text = boost::regex_replace(text, boost::wregex(L"(COMPANT|COMPEM|COMIANY)[\\.,]?$", boost::regex::icase), L"company");
+				text = boost::regex_replace(text, boost::wregex(L"han[tu]uha", boost::regex::icase), L"hanwha");
 				text = boost::regex_replace(text, boost::wregex(L"A\\.N\\.$", boost::regex::icase), L"A.S.");
+				text = boost::regex_replace(text, boost::wregex(L"SAMSUNG F[I1]RE(?:\\s?&)?", boost::regex::icase), L"SAMSUNG FIRE & MARINE INSURANCE");
+				text = boost::regex_replace(text, boost::wregex(L"LIMITEDC", boost::regex::icase), L"LIMITED(");
+				text = boost::regex_replace(text, boost::wregex(L"IIUA[IT]AI|HUATAL", boost::regex::icase), L"HUATAI");
+				text = boost::regex_replace(text, boost::wregex(L"HYUNDAI ALUMINUM", boost::regex::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"BAOVIET", boost::regex::icase), L"BAOVIET INSURANCE");
+				text = boost::regex_replace(text, boost::wregex(L"HYUNDAI", boost::regex::icase), L"HYUNDAI MARINE & FIRE INSURANCE CO.,LTD");
+				text = boost::regex_replace(text, boost::wregex(L"4\\)", boost::regex::icase), "&");
+				text = boost::trim_copy(text);
 
-				if (text.size() < 9 || std::count(std::begin(text), std::end(text), L' ') == 0 || boost::erase_all_copy(text, L" ").find(L"INSURANCEPLICY") != std::wstring::npos)
+				if (text.size() < 9 || boost::erase_all_copy(text, L" ").find(L"INSURANCEPOLICY") != std::wstring::npos)
 					return std::make_pair(std::get<0>(a), L"");
 
 				std::vector<std::wstring> words;
@@ -15357,10 +22053,9 @@ namespace selvy {
 					text[last_matched.get_end() + 1] == L'.' ||
 					text[last_matched.get_end() + 1] == L',' ||
 					text[last_matched.get_end() + 1] == L' ' ||
-					text[last_matched.get_end() + 1] == L' ') {
-
+					text[last_matched.get_end() + 1] == L'(') {
 					if (last_matched.get_keyword().size() < 9)
-						return a;
+						return std::make_pair(std::get<0>(a), text);
 
 					const auto company = std::wstring(text.begin() + last_matched.get_start(), text.begin() + last_matched.get_end() + 1);
 					const auto processed_company = boost::to_upper_copy(boost::trim_copy(company));
@@ -15402,10 +22097,10 @@ namespace selvy {
 					}
 				}
 
-				
+
 
 				return std::make_pair(std::get<0>(a), L"");
-				
+
 			}
 
 			static bool func_is_date(std::wstring strDate) {
@@ -15420,14 +22115,14 @@ namespace selvy {
 				std::regex pt06("[0-9]{2}[a-zA-Z]{3}[0-9]{4}");
 				std::regex pt07("[0-9]{2}[ .,/-]{1}[0-9]{2}[ .,/-]{1}[0-9]{4}");
 
-				
+
 				if (std::regex_search(strDate.begin(), strDate.end(), pt01) ||
 					std::regex_search(strDate.begin(), strDate.end(), pt02) ||
 					std::regex_search(strDate.begin(), strDate.end(), pt03) ||
 					std::regex_search(strDate.begin(), strDate.end(), pt04) ||
 					std::regex_search(strDate.begin(), strDate.end(), pt05) ||
 					std::regex_search(strDate.begin(), strDate.end(), pt06) ||
-					std::regex_search(strDate.begin(), strDate.end(), pt07) ){
+					std::regex_search(strDate.begin(), strDate.end(), pt07)) {
 
 					if (strDate.size() <= 12)
 						return true;
@@ -15439,70 +22134,6 @@ namespace selvy {
 				}
 			}
 
-			//preprocess_lc_number
-			static std::pair<cv::Rect, std::wstring>
-				preprocess_lc_number(const std::pair<cv::Rect, std::wstring>& a)
-			{
-				auto text = std::get<1>(a);
-				//text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
-
-				return std::make_pair(std::get<0>(a), text);
-			}
-
-			static std::pair<cv::Rect, std::wstring>
-				preprocess_credit_number(const std::pair<cv::Rect, std::wstring>& a)
-			{
-				auto text = std::get<1>(a);
-				//text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
-				//text = boost::regex_replace(text, boost::wregex(L":"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"(DATE)(.*)"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"[«:]{1}"), L""); 
-				text = boost::regex_replace(text, boost::wregex(L"83I"), L"831");
-				text = boost::regex_replace(text, boost::wregex(L"LCP"), L"LC0");
-				text = boost::regex_replace(text, boost::wregex(L"O03"), L"003");
-				text = boost::regex_replace(text, boost::wregex(L"(£9O；|I9UI)"), L"1901");
-				text = boost::regex_replace(text, boost::wregex(L"2Q28O2O"), L"2028020");
-				text = boost::regex_replace(text, boost::wregex(L"[38]{1}-004"), L"S-004");
-				text = boost::regex_replace(text, boost::wregex(L"(0000[(]{1}쇼)"), L"00000");
-
-				return std::make_pair(std::get<0>(a), text);
-			}
-
-			static std::pair<cv::Rect, std::wstring>
-				preprocess_amount(const std::pair<cv::Rect, std::wstring>& a)
-			{
-				auto text = boost::to_upper_copy(std::get<1>(a));
-				text = boost::regex_replace(text, boost::wregex(L"[^A-Z0-9,]"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"(AMOUNT)"), L"");
-				
-				text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
-				text = boost::regex_replace(text, boost::wregex(L"I"), L"1");
-				text = boost::regex_replace(text, boost::wregex(L"(OCX)"), L"000");
-				text = boost::regex_replace(text, boost::wregex(L"(PR)"), L"9.");
-				//text = boost::regex_replace(text, boost::wregex(L"(R)"), L".");
-
-				text = boost::regex_replace(text, boost::wregex(L"(TOLERANCE|TOLEANCE)(.*)"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"(TOLERA[NH]{1}CE)(.*)"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"(QUANTrTY)(.*)"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"0SD"), L"USD"); 
-				text = boost::regex_replace(text, boost::wregex(L"UOD"), L"USD");
-				text = boost::regex_replace(text, boost::wregex(L"GSD"), L"USD");
-				text = boost::regex_replace(text, boost::wregex(L"새0때T"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"32B"), L"");
-				text = boost::regex_replace(text, boost::wregex(L"6CCOO"), L"600.00");
-				return std::make_pair(std::get<0>(a), text);
-			}
-
-			static std::pair<cv::Rect, std::wstring>
-				preprocess_currency_sign(const std::pair<cv::Rect, std::wstring>& a)
-			{
-				auto text = std::get<1>(a);
-				//text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
-
-				return std::make_pair(std::get<0>(a), text);
-			}
-
-
 			static std::pair<cv::Rect, std::wstring>
 				preprocess_country(const std::pair<cv::Rect, std::wstring>& a, const configuration& configuration, const std::wstring& category)
 			{
@@ -15511,8 +22142,10 @@ namespace selvy {
 				text = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z\\., ]"), L"");
 				text = boost::regex_replace(text, boost::wregex(L"(\\s)\\s+"), L"$1");
 				text = boost::regex_replace(text, boost::wregex(L"\\s*([\\.,])\\s*"), L"$1");
-				text = boost::regex_replace(text, boost::wregex(L"\\s+(\\S)\\s+"), L"$1");
+				text = boost::regex_replace(text, boost::wregex(L"\\s+(\\S)\\s+"), L"$1 ");
 				text = boost::regex_replace(text, boost::wregex(L"(?:^.*\\s+TO|^TO)\\s+", boost::regex::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"KQREA", boost::regex::icase), L"KOREA");
+				text = boost::regex_replace(text, boost::wregex(L"KEB HANA", boost::regex::icase), L"");
 
 				std::vector<std::wstring> words;
 				boost::algorithm::split(words, text, boost::is_any_of(L",. "), boost::token_compress_on);
@@ -15545,22 +22178,90 @@ namespace selvy {
 
 					text = boost::algorithm::join(words, L" ");
 				}
+				if (boost::regex_search(text, boost::wregex(L"CARRIER", boost::regex::icase))
+					|| boost::regex_search(text, boost::wregex(L"SIGNED FOR", boost::regex::icase))
+					|| boost::regex_search(text, boost::wregex(L"KWUN TONGA", boost::regex::icase))) {
+					return std::make_pair(std::get<0>(a), L"");
+				}
+				if (boost::regex_search(text, boost::wregex(L"SAUDI ARUBA", boost::regex::icase)))
+					text = L"SAUDI ARABIA";
 
 				const auto matches = trie.parse_text(text);
+				if (!matches.empty()) {
+					if (matches.back().get_keyword() == L"usa" && boost::regex_search(text, boost::wregex(L"(?:B|P)USAN|ULSAN", boost::regex::icase)))
+						return std::make_pair(to_rect(a), L"KOREA");
 
-				if (!matches.empty())
-					return std::make_pair(to_rect(a), std::wstring(text.begin() + matches[0].get_start(),
-					text.begin() + matches[0].get_end() + 1));
+					return std::make_pair(to_rect(a), std::wstring(text.begin() + matches.back().get_start(),
+						text.begin() + matches.back().get_end() + 1));
+				}
 
 				return std::make_pair(std::get<0>(a), L"");
 			}
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_lc_number(const std::pair<cv::Rect, std::wstring>& a)
+			{
+				auto text = std::get<1>(a);
+				//text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
 
+				return std::make_pair(std::get<0>(a), text);
+			}
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_credit_number(const std::pair<cv::Rect, std::wstring>& a)
+			{
+				auto text = std::get<1>(a);
+				//text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
+				//text = boost::regex_replace(text, boost::wregex(L":"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(DATE)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"[«:]{1}"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"83I"), L"831");
+				text = boost::regex_replace(text, boost::wregex(L"LCP"), L"LC0");
+				text = boost::regex_replace(text, boost::wregex(L"O03"), L"003");
+				text = boost::regex_replace(text, boost::wregex(L"(£9O；|I9UI)"), L"1901");
+				text = boost::regex_replace(text, boost::wregex(L"2Q28O2O"), L"2028020");
+				text = boost::regex_replace(text, boost::wregex(L"[38]{1}-004"), L"S-004");
+				text = boost::regex_replace(text, boost::wregex(L"(0000[(]{1}쇼)"), L"00000");
+
+				return std::make_pair(std::get<0>(a), text);
+			}
+			//static std::pair<cv::Rect, std::wstring>
+			//	preprocess_amount(const std::pair<cv::Rect, std::wstring>& a)
+			//{
+			//	auto text = std::get<1>(a);
+			//	//text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
+
+			//	return std::make_pair(std::get<0>(a), text);
+			//}
+			static std::pair<cv::Rect, std::wstring>
+				preprocess_amount(const std::pair<cv::Rect, std::wstring>& a)
+			{
+				auto text = boost::to_upper_copy(std::get<1>(a));
+				text = boost::regex_replace(text, boost::wregex(L"[^A-Z0-9,]"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(AMOUNT)"), L"");
+
+				text = boost::regex_replace(text, boost::wregex(L"\\|"), L"1");
+				text = boost::regex_replace(text, boost::wregex(L"I"), L"1");
+				text = boost::regex_replace(text, boost::wregex(L"(OCX)"), L"000");
+				text = boost::regex_replace(text, boost::wregex(L"(PR)"), L"9.");
+				//text = boost::regex_replace(text, boost::wregex(L"(R)"), L".");
+
+				text = boost::regex_replace(text, boost::wregex(L"(TOLERANCE|TOLEANCE)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(TOLERA[NH]{1}CE)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(QUANTrTY)(.*)"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"0SD"), L"USD");
+				text = boost::regex_replace(text, boost::wregex(L"UOD"), L"USD");
+				text = boost::regex_replace(text, boost::wregex(L"GSD"), L"USD");
+				text = boost::regex_replace(text, boost::wregex(L"새0때T"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"32B"), L"");
+				text = boost::regex_replace(text, boost::wregex(L"6CCOO"), L"600.00");
+				return std::make_pair(std::get<0>(a), text);
+			}
 			static std::pair<cv::Rect, std::wstring>
 				preprocess_good_description(const std::pair<cv::Rect, std::wstring>& a)
 			{
 				auto good_description = to_wstring(a);
 
-				good_description = boost::regex_replace(good_description, boost::wregex(L"[^ a-zA-Z0-9&-]"), L"");
+				good_description = boost::regex_replace(good_description, boost::wregex(L"이"), "OI");
+				good_description = boost::regex_replace(good_description, boost::wregex(L"[^ a-zA-Z0-9&/()-]"), L"");
 				boost::trim(good_description);
 
 				return std::make_pair(to_rect(a), good_description);
@@ -15578,13 +22279,31 @@ namespace selvy {
 				text = boost::regex_replace(text, boost::wregex(L"(.*) SAILING ON.*", boost::regex_constants::icase), L"$1");
 				text = boost::regex_replace(text, boost::wregex(L"V\\.s+", boost::regex_constants::icase), L"V.");
 				text = boost::regex_replace(text, boost::wregex(L"\\s+"), L" ");
+				text = boost::regex_replace(text, boost::wregex(L".*VESSEL CALLED(?: THE )?", boost::regex_constants::icase), L"");
 				text = boost::trim_copy(text);
 
-				if (std::count_if(std::begin(text), std::end(text), std::isalpha) < 3)
+				if (boost::regex_search(text, boost::wregex(L"VESSEL", boost::regex_constants::icase)) ||
+					boost::iequals(text, L"VOYAGE"))
+					return L"";
+
+				if (std::count_if(std::begin(text), std::end(text), std::iswalpha) < 3)
 					return L"";
 
 				if (text.size() > 45 || text.size() < 4)
 					return L"";
+
+				if (boost::regex_search(text, boost::wregex(L"PORT", boost::regex_constants::icase))) {
+					const auto dictionary = get_dictionary_words(configuration, dictionaries_, L"countries");
+
+					aho_corasick::wtrie trie;
+					trie.case_insensitive().remove_overlaps().allow_space();
+					build_trie(trie, dictionary);
+
+					const auto matches = trie.parse_text(text);
+
+					if (!matches.empty())
+						return L"";
+				}
 
 				if (!classify_text(text, get_weights(configuration, weights_, L"vessel"), 0.5)) {
 					const auto dictionary = get_dictionary_words(configuration, dictionaries_, L"vessels");
@@ -15606,17 +22325,38 @@ namespace selvy {
 					}
 				}
 
+				text = boost::regex_replace(text, boost::wregex(L"[#\\/]? VOY- ?\\d[0-9A-Z]+$", boost::regex_constants::icase), L"");///////////////
+				text = boost::regex_replace(text, boost::wregex(L"V ?\\d[0-9A-Z]+$", boost::regex_constants::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"[#\\/]? ?V[-#\\.] ?\\d[0-9A-Z]+$", boost::regex_constants::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"[-\\/]{1,2} ?\\d[-0-9A-Z]+$", boost::regex_constants::icase), L"");
+
+				text = boost::regex_replace(text, boost::wregex(L"\\d{3,4}-[0-9]*$", boost::regex_constants::icase), L"");  ///////////
+
+				text = boost::regex_replace(text, boost::wregex(L"\\d{3,4}[A-Z][0-9A-Z]*$", boost::regex_constants::icase), L"");
+				text = boost::trim_copy(text);
+
+
 				return boost::algorithm::trim_copy(boost::to_upper_copy(text));
 			}
 
 			static std::wstring
 				postprocess_lc_number(const std::wstring& a, const configuration& configuration)
 			{
-				auto text = boost::regex_replace(a, boost::wregex(L"[^ /a-z0-9A-Z&]", boost::regex_constants::icase), L"");
+				std::wstring text;
+				if (a.find(L":") != 0)
+				{
+					text = a.substr(a.find(L":") + 1);
+				}
+				text = boost::regex_replace(text, boost::wregex(L"[^ -/a-z0-9A-Z&]", boost::regex_constants::icase), L"");
 				text = boost::regex_replace(text, boost::wregex(L"date", boost::regex_constants::icase), L"");
 				text = boost::regex_replace(text, boost::wregex(L"of", boost::regex_constants::icase), L"");
 				text = boost::regex_replace(text, boost::wregex(L"issue", boost::regex_constants::icase), L"");
-
+				text = boost::regex_replace(text, boost::wregex(L"AND", boost::regex_constants::icase), L"");
+				// jan, feb, mar, apr, may, jun, jul, aug, sep, oct, nov, dec
+				text = boost::regex_replace(text, boost::wregex(L"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)-[0-9]{2}-[0-9]{4}", boost::regex_constants::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"[0-9]{4}-(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)-[0-9]{2}", boost::regex_constants::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"[0-9]{2}-(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)-[0-9]{4}", boost::regex_constants::icase), L"");
+				//text = boost::regex_replace(text, boost::wregex(L"D/A-", boost::regex_constants::icase), L"");
 				if (text.find(L"L/C") != -1)
 				{
 					return L"";
@@ -15635,6 +22375,55 @@ namespace selvy {
 				if (text.size() > 45 || text.size() < 6)
 					return L"";
 
+
+				return boost::algorithm::trim_copy(boost::to_upper_copy(text));
+			}
+
+			static std::wstring
+				postprocess_amount(const std::wstring& a, const configuration& configuration)
+			{
+				auto text = boost::regex_replace(a, boost::wregex(L"[^ a-zA-Z\\$￥0-9.,]", boost::regex_constants::icase), L"");
+
+				auto chk = text.find(L"￥");
+
+				//text = boost::trim_copy(text);
+
+				const auto dictionary = get_dictionary_words(configuration, dictionaries_, L"currency");
+
+				aho_corasick::wtrie trie;
+				trie.case_insensitive().remove_overlaps().allow_space();
+				build_trie(trie, dictionary);
+
+				const auto matches = trie.parse_text(text);
+
+				if (matches.empty() && chk == -1)
+					return L"";
+
+
+				if (!matches.empty() || chk != -1) {
+					const auto match = matches[matches.size() - 1];
+					auto substr_start_idx = match.get_start() + match.size();
+					text = text.substr(substr_start_idx);
+					text = boost::regex_replace(text, boost::wregex(L"[^0-9.,]", boost::regex_constants::icase), L"");
+					text = boost::trim_copy(text);
+
+					//text = boost::regex_replace(text, boost::wregex(L"[.]", boost::regex_constants::icase), L",");
+
+					//auto comma_idx = text.rfind(L",");
+					//if (text.size() - 1 - comma_idx == 2)
+					//{
+					//	text[comma_idx] = L'.';
+					//	//text[comma_idx] 을 L"." 으로 대체
+					//}
+					//else if (text.size() - 1 - comma_idx == 5)
+					//{
+					//	text.insert(comma_idx + 4, L".");
+					//	//text[comma_idx + 3] 에 L"." 추가
+					//}
+
+
+					return text;
+				}
 
 				return boost::algorithm::trim_copy(boost::to_upper_copy(text));
 			}
@@ -15672,103 +22461,110 @@ namespace selvy {
 			static std::wstring
 				postprocess_currency_sign(const std::wstring& a, const configuration& configuration)
 			{
-				auto text = boost::regex_replace(a, boost::wregex(L"[^a-zA-Z\\$￥]", boost::regex_constants::icase), L"");
+				auto text = boost::regex_replace(a, boost::wregex(L"[^ a-zA-Z\\$￥]", boost::regex_constants::icase), L" ");
 				auto digit_text = boost::regex_replace(a, boost::wregex(L"[^0-9.,]", boost::regex_constants::icase), L"");
 				auto chk = text.find(L"￥");
 				if (chk >= 0 && chk < text.size())
 				{
 					return L"￥";
 				}
-
+				//띄어쓰기로 나눈다음에 각각 단어에 대해 확인
 				text = boost::trim_copy(text);
 
 				const auto dictionary = get_dictionary_words(configuration, dictionaries_, L"currency");
 
 				aho_corasick::wtrie trie;
-				trie.case_insensitive().remove_overlaps().allow_space();
+				trie.case_insensitive().remove_overlaps();
 				build_trie(trie, dictionary);
-
-				const auto matches = trie.parse_text(text);
-
-				if (matches.empty())
-					return L"";
-
-
-				if (text.size() == 2 && text.compare(L"US") == 0)
+				std::wstringstream wss(text);
+				std::wstring tmp;
+				std::vector<std::wstring> substr_;
+				while (std::getline(wss, tmp, L' '))
 				{
-					text = boost::regex_replace(text, boost::wregex(L"S", boost::regex_constants::icase), L"$");
+					substr_.emplace_back(tmp);
 				}
 
-				if (!matches.empty()) {
-					const auto match = matches[0];
-					if (match.get_start() != 0 ||
-						(match.get_end() + 1 != text.size() && text[match.get_end() + 1] != L' ' && text[match.get_end() + 1] != L'.' && text[match.get_end() + 1] != L'V'))
-						if (digit_text.size() > a.size()*0.5) {
-							return text.substr(match.get_start(), match.size());
-						}
-						else {
-							return L"";
-						}
-				}
+				for (auto substr : substr_)
+				{
+					const auto matches = trie.parse_text(substr);
+					if (text.size() == 2 && text.compare(L"US") == 0)
+					{
+						text = boost::regex_replace(text, boost::wregex(L"S", boost::regex_constants::icase), L"$");
+					}
 
-				return boost::algorithm::trim_copy(boost::to_upper_copy(text));
+					if (!matches.empty()) {
+						const auto match = matches[0];
+						if (match.get_end() + 1 == substr.length())
+							return substr;
+
+					}
+				}
+				return L"";
 			}
 
 			static std::wstring
-				postprocess_amount(const std::wstring& a, const configuration& configuration)
+				postprocess_digit_for_ci(const std::wstring& a, const configuration& configuration)
 			{
-				auto text = boost::regex_replace(a, boost::wregex(L"[^ a-zA-Z\\$￥0-9.,]", boost::regex_constants::icase), L"");
-
-				auto chk = text.find(L"￥");
-
-				//text = boost::trim_copy(text);
-
-				const auto dictionary = get_dictionary_words(configuration, dictionaries_, L"currency");
-
-				aho_corasick::wtrie trie;
-				trie.case_insensitive().remove_overlaps().allow_space();
-				build_trie(trie, dictionary);
-
-				const auto matches = trie.parse_text(text);
-
-				if (matches.empty() && chk == -1)
+				auto digit = boost::regex_replace(a, boost::wregex(L"[^0-9]"), L"");
+				if (digit.length() < 5)
 					return L"";
 
-
-				if (!matches.empty() || chk != -1) {
-					const auto match = matches[matches.size() - 1];
-					auto substr_start_idx = match.get_start() + match.size();
-					text = text.substr(substr_start_idx);
-					text = boost::regex_replace(text, boost::wregex(L"[^0-9.,]", boost::regex_constants::icase), L"");
-					text = boost::trim_copy(text);
-
-					text = boost::regex_replace(text, boost::wregex(L"[.]", boost::regex_constants::icase), L",");
-					auto comma_idx = text.rfind(L",");
-					if (text.size() - 1 - comma_idx == 2)
+				const auto dictionary = get_dictionary_words(configuration, dictionaries_, L"currency");
+				const auto dictionary2 = get_dictionary_words(configuration, dictionaries_, L"amountunit");
+				std::wstring text = boost::regex_replace(a, boost::wregex(L"£"), L"14");;
+				text = boost::regex_replace(text, boost::wregex(L"0SD", boost::regex::icase), L"USD");
+				for (auto key2 : dictionary2)
+				{
+					if (text.find(key2) != -1)
 					{
-						text[comma_idx] = L'.';
-						//text[comma_idx] 을 L"." 으로 대체
+						text = text.substr(text.find(key2) + key2.length());
 					}
-					else if (text.size() - 1 - comma_idx == 5)
-					{
-						text.insert(comma_idx + 4, L".");
-						//text[comma_idx + 3] 에 L"." 추가
-					}
-
-
-					return text;
 				}
 
+
+				for (auto key : dictionary)
+				{
+					text = boost::regex_replace(text, boost::wregex(key, boost::regex::icase), L"");
+				}
+				//text = boost::regex_replace(text, boost::wregex(L"0SD", boost::regex::icase), L"");
+				//text = boost::regex_replace(text, boost::wregex(L"[^ 0-9,\.]", boost::regex::icase), L"");
+				auto only_char = boost::regex_replace(text, boost::wregex(L"[^a-zA-Z]", boost::regex::icase), L"");
+				//text = boost::regex_replace(text, boost::wregex(L"(TOTAL|PRICE|AMOUNT)", boost::regex::icase), L"");
+				//text = boost::regex_replace(text, boost::wregex(L"0SD", boost::regex::icase), L"");
+				//text = boost::regex_replace(text, boost::wregex(L"[^ 0-9,\.]", boost::regex::icase), L"");
+				if (digit.length() < 5 || only_char.length() > digit.length())
+					return L"";
+
 				return boost::algorithm::trim_copy(boost::to_upper_copy(text));
+
+			}
+
+			static std::wstring
+				postprocess_swift_code(const std::wstring& a, const configuration& configuration)
+			{
+				return a;
 			}
 
 			static std::wstring
 				postprocess_goods_description(const std::wstring& a, const configuration& configuration)
 			{
 				auto text = boost::regex_replace(a, boost::wregex(L"(?:NAME|OF GOODS)\\s*(?:-|:)?\\s*", boost::regex_constants::icase), L"");
-				text = boost::regex_replace(text, boost::wregex(L"(?:\\s*-?\\s*\\d+\\.?\\d+\\s*(?:MTS?|QTY|KGS|KGM)\\s?(?:OF)?|\\s*-?\\s*(?:MTS?|QTY|QUANTITY|KGS|KGM)\\s*\\d+\\.?\\d+/\\d+\\s?UNITS? OF\\s?)", boost::regex_constants::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"(?:\\s*-?\\s*\\d+\\.?\\d+\\s*(?:MTS?|QTY|KGS|KGM)\\s?(?:OF)?|\\s*-?\\s*(?:MTS?|QTY|QUANTITY|KGS|KGM)\\s*\\d+\\.?\\d+|\\d+\\s?UNITS? OF\\s?)", boost::regex_constants::icase), L"");
+				text = boost::regex_replace(text, boost::wregex(L"이", boost::regex_constants::icase), L"OI");
 
 				if (text.size() > 60 || text.size() < 3)
+					return L"";
+
+				if (boost::regex_search(text, boost::wregex(L"DATE|INVOICE|AMOUNT|INSURE|AS ATTACHED\\s|(?:TERMS|PLACE) OF", boost::regex_constants::icase)))
+					return L"";
+
+				if (boost::regex_search(text, boost::wregex(L"^PLACE OF", boost::regex_constants::icase)))
+					return L"";
+
+				if (boost::regex_search(text, boost::wregex(L"^ITEM$", boost::regex_constants::icase)))
+					return L"";
+
+				if (boost::regex_match(text, boost::wregex(L"^\\d*\\s*UNITS?$")))
 					return L"";
 
 				if (!classify_text(text, get_weights(configuration, weights_, L"goods"), 0.4)) {
@@ -15786,12 +22582,6 @@ namespace selvy {
 					return boost::algorithm::trim_copy(boost::to_upper_copy(text));
 				}
 
-				if (boost::regex_search(text, boost::wregex(L"DATE|INVOICE|AMOUNT|INSURE|AS ATTACHED\\s|(?:TERMS|PLACE) OF", boost::regex_constants::icase)))
-					return L"";
-
-				if (boost::regex_search(text, boost::wregex(L"^ITEM$", boost::regex_constants::icase)))
-					return L"";
-
 				return boost::algorithm::trim_copy(boost::to_upper_copy(text));
 			}
 		};
@@ -15806,7 +22596,12 @@ namespace selvy {
 			}
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
 				recognize(const boost::filesystem::path& path,
-				const std::wstring& class_name) override
+					const std::wstring& class_name) override
+			{
+				throw std::logic_error("not implmented");
+			}
+			std::pair<std::unordered_map<std::wstring, std::wstring>, std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>>
+				recognize(const boost::filesystem::path& path, const std::string& secret, const int ignore) override
 			{
 				throw std::logic_error("not implmented");
 			}
@@ -15817,7 +22612,7 @@ namespace selvy {
 
 				CComPtr<FREngine::IEngineLoader> loader;
 				FREngine::IEnginePtr engine;
-				std::tie(loader, engine) = get_engine_object(configuration);
+				std::tie(loader, engine) = get_engine_object(configuration, false);
 
 				memory_reader memory_reader(buffer, secret);
 				std::vector<block> blocks;
@@ -15861,14 +22656,14 @@ namespace selvy {
 				catch (_com_error& e) {
 				}
 
-				release_engine_object(std::make_pair(loader, engine));
+				release_engine_object(std::make_pair(loader, engine), false);
 
 				return std::make_pair(to_wstring(blocks), to_confidence(confidences));
 			}
 
 			std::unordered_map<std::wstring, std::vector<std::wstring>>
 				recognize(const boost::filesystem::path& path,
-				const std::string& secret) override
+					const std::string& secret) override
 			{
 				throw std::logic_error("not implmented");
 			}
@@ -15899,7 +22694,11 @@ namespace selvy {
 			using Line = std::vector<CFineTextCharacter>;
 			using Block = std::vector<Line>;
 			using Layout = std::vector<Block>;
-
+			std::pair<std::unordered_map<std::wstring, std::wstring>, std::unordered_map<std::wstring, std::pair<std::wstring, std::vector<std::pair<cv::Rect, std::wstring>>>>>
+				recognize(const boost::filesystem::path& path, const std::string& secret, const int ignore) override
+			{
+				throw std::logic_error("not implmented");
+			}
 			std::pair<std::wstring, int>
 				recognize(const std::string& buffer, const std::wstring& type, const std::string& secret) override
 			{
@@ -15911,7 +22710,7 @@ namespace selvy {
 
 					CComPtr<FREngine::IEngineLoader> loader;
 					FREngine::IEnginePtr engine;
-					std::tie(loader, engine) = get_engine_object(configuration);
+					std::tie(loader, engine) = get_engine_object(configuration, false);
 					recognition_ticks.stop();
 					SV_LOG("service", spdlog::level::info, "get_engine_object time : {:.2f}Sec", recognition_ticks.getTimeSec());
 
@@ -15994,7 +22793,8 @@ namespace selvy {
 						for (auto& line : id_lines) {
 							cv::rectangle(image, to_rect(line), cv::Scalar(0, 0, 0), CV_FILLED);
 						}
-					} else if (type == L"fr") {
+					}
+					else if (type == L"fr") {
 						auto all_words = divide_to_word_for_family(all_lines, 1);
 						sort_lines(all_words);
 
@@ -16018,7 +22818,8 @@ namespace selvy {
 								key_rect.y = r.y;
 								if ((r & key_rect).area() > r.area() * 0.5)
 									num_block.push_back(line);
-							} else {
+							}
+							else {
 								if (r.x > image_width / 3)
 									num_block.push_back(line);
 							}
@@ -16035,8 +22836,9 @@ namespace selvy {
 
 					document->Close();
 
-					release_engine_object(std::make_pair(loader, engine));
-				} catch (_com_error& e) {
+					release_engine_object(std::make_pair(loader, engine), false);
+				}
+				catch (_com_error& e) {
 					spdlog::get("recognizer")->error("exception : {} : ({} : {})", to_cp949(e.Description().GetBSTR()), __FILE__, __LINE__);
 				}
 
@@ -16148,7 +22950,7 @@ namespace selvy {
 					auto& c = text[i];
 					if (c == paragraph_break) {
 						//if (!word.empty())
-							//line.emplace_back(word);
+						//line.emplace_back(word);
 						if (!line.empty())
 							block.emplace_back(line);
 						if (!block.empty()) {
@@ -16158,14 +22960,16 @@ namespace selvy {
 						//word.clear();
 						line.clear();
 						block.clear();
-					} else if (c == line_break || c == line_break2) {
+					}
+					else if (c == line_break || c == line_break2) {
 						//if (!word.empty())
-							//line.emplace_back(word);
+						//line.emplace_back(word);
 						if (!line.empty())
 							block.emplace_back(line);
 						//word.clear();
 						line.clear();
-					} else {
+					}
+					else {
 						line.emplace_back(to_CFine_character(c, left_borders[i], top_borders[i], right_borders[i], bottom_borders[i]));
 					}
 				}
@@ -16181,7 +22985,8 @@ namespace selvy {
 
 					if (block->GetType() == FREngine::BT_Text) {
 						extract_data_from_block(engine, block, extracted_data);
-					} else if (block->GetType() == FREngine::BT_Table) {
+					}
+					else if (block->GetType() == FREngine::BT_Table) {
 						extract_data_from_cell(engine, block, extracted_data);
 					}
 				}
@@ -16215,7 +23020,8 @@ namespace selvy {
 								new_line.clear();
 								line_index++;
 								char_count = 0;
-							} else {
+							}
+							else {
 								CFineTextCharacter character;
 								character.Unicode = L' ';
 								character.Quality = 100;
@@ -16253,7 +23059,8 @@ namespace selvy {
 					const auto block_type = cells->Item(index)->GetBlock()->GetType();
 					if (block_type == FREngine::BT_Text) {
 						extract_data_from_block(engine, block, layout);
-					} else if (block_type == FREngine::BT_Table) {
+					}
+					else if (block_type == FREngine::BT_Table) {
 						extract_data_from_cell(engine, block, layout);
 					}
 				}
@@ -16329,7 +23136,8 @@ namespace selvy {
 							line1.emplace_back(character);
 							line1.insert(line1.end(), line2.begin(), line2.end());
 							block.erase(block.begin() + j);
-						} else {
+						}
+						else {
 							j++;
 						}
 					}
@@ -16348,7 +23156,8 @@ namespace selvy {
 						if (is_proximity_blocks(to_rect(block1), to_rect(block2), threshold)) {
 							block1.insert(block1.end(), block2.begin(), block2.end());
 							layout.erase(layout.begin() + j);
-						} else {
+						}
+						else {
 							j++;
 						}
 					}
@@ -16372,7 +23181,8 @@ namespace selvy {
 								auto& rect2 = from(line2.Rect);
 								if ((rect1&rect2).area() > rect1.area() * 0.9 && line1.Unicode == line2.Unicode) {
 									line.erase(line.begin() + j);
-								} else {
+								}
+								else {
 									j++;
 								}
 							}
@@ -16405,7 +23215,8 @@ namespace selvy {
 							line1.emplace_back(character);
 							line1.insert(line1.end(), line2.begin(), line2.end());
 							block.erase(block.begin() + j);
-						} else {
+						}
+						else {
 							j++;
 						}
 					}
@@ -16432,14 +23243,16 @@ namespace selvy {
 								}
 								words.push_back(word);
 								word.clear();
-							} else {
+							}
+							else {
 								word.push_back(line[i]);
 								if (i == line.size() - 2) {
 									word.push_back(line[i + 1]);
 								}
 							}
 						}
-					} else {
+					}
+					else {
 						word = line;
 					}
 					words.push_back(word);
@@ -16468,14 +23281,16 @@ namespace selvy {
 								}
 								words.push_back(word);
 								word.clear();
-							} else {
+							}
+							else {
 								word.push_back(line[i]);
 								if (i == line.size() - 2) {
 									word.push_back(line[i + 1]);
 								}
 							}
 						}
-					} else {
+					}
+					else {
 						word = line;
 					}
 					words.push_back(word);
@@ -16711,10 +23526,12 @@ namespace selvy {
 				return std::make_unique<coa_document_recognizer>();
 			else if (profile == L"account")
 				return std::make_unique<account_recognizer>();
-			else if (profile == L"court")
-				return std::make_unique<court_document_recognizer>();
+			else if (profile == L"entrust")
+				return std::make_unique<entrust_document_recognizer>();
 			else if (profile == L"idcard")
 				return std::make_unique<idcard_document_recognizer>();
+			else if (profile == L"retirement")
+				return std::make_unique<retirement_document_recognizer>();
 			return nullptr;
 		}
 
